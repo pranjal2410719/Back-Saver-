@@ -154,22 +154,28 @@ sidebarOverlay.addEventListener('click', closeMobileSidebar);
 // ════════════════════════════════════════════════════════════
 
 const API_URLS  = '/api/urls';
-const API_STATS = '/api/stats';
 
 async function loadServerState() {
   try {
-    const urls = localStorage.getItem('backsaver_urls');
-    if (urls) savedUrls = JSON.parse(urls);
+    const res = await fetch(API_URLS);
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data.urls)) savedUrls = data.urls;
+    }
   } catch (e) {
-    console.warn('Failed to load urls', e);
+    console.warn('Failed to load urls from server', e);
   }
 }
 
 async function persistUrls() {
   try {
-    localStorage.setItem('backsaver_urls', JSON.stringify(savedUrls));
+    await fetch(API_URLS, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ urls: savedUrls }),
+    });
   } catch (e) {
-    console.warn('Failed to persist', e);
+    console.warn('Failed to persist URLs to server', e);
   }
 }
 
