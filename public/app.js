@@ -481,6 +481,7 @@ function startAllMonitoring() {
   }
 
   cfg.isMonitoring = true;
+  localStorage.setItem('backsaver_is_monitoring', 'true');
 
   // Lock inputs
   urlInput  && (urlInput.disabled = true);
@@ -513,6 +514,7 @@ function startAllMonitoring() {
 
 function stopAllMonitoring() {
   cfg.isMonitoring = false;
+  localStorage.setItem('backsaver_is_monitoring', 'false');
 
   monitors.forEach(m => { clearTimeout(m.timerId); clearInterval(m.countdownId); });
   monitors.clear();
@@ -774,6 +776,7 @@ function flashBorder(el, color) {
 // INIT
 // ════════════════════════════════════════════════════════════
 
+
 (async function init() {
   try {
     await loadServerState();
@@ -784,6 +787,12 @@ function flashBorder(el, color) {
   renderAll();
   syncAllStartButtons();
   startServerRefresh();
+
+  // Auto-resume monitoring if it was active before refresh
+  if (localStorage.getItem('backsaver_is_monitoring') === 'true' && savedUrls.length > 0) {
+    setTimeout(startAllMonitoring, 500); // Slight delay for UI to settle
+  }
+
 
   // ── Developer Welcome Popup & Copyright ──
   const currentYear = new Date().getFullYear();
