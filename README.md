@@ -1,56 +1,36 @@
-# BackSaver
+This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
-A multi-URL health monitor that checks your endpoints every minute, around the clock — even when you're offline.
+## Getting Started
 
-## How It Works
-
-- **Persistence:** URLs you add are stored in [Netlify Blobs](https://docs.netlify.com/build/data-and-storage/netlify-blobs/), not the browser — they survive refreshes and redeploys.
-- **Scheduled monitoring:** a [scheduled function](https://docs.netlify.com/build/functions/scheduled-functions/) (`netlify/functions/monitor.mjs`) runs every minute, reads your saved URLs, probes each one, and stores the results. No browser, no laptop, no downtime-blind spots.
-- **Live dashboard:** the UI polls the stored results every 15 seconds and shows uptime, response times, and check logs.
-
-## Architecture
-
-```
-Browser (index.html + app.js)
-   │  GET /api/urls          load saved URLs
-   │  POST /api/urls         save/remove URLs
-   │  GET /api/stats         latest checks + log (polled every 15s)
-   ▼
-Netlify Functions
-   ├── urls.mjs    read/write URL list       → Blob "backsaver/urls"
-   ├── stats.mjs   read latest checks + log  → Blob "backsaver/latest", "backsaver/log"
-   └── monitor.mjs scheduled (cron */1 * * * *) → probes each URL, writes results
-```
-
-## Local Development
-
-The Blob store is emulated by the Netlify CLI:
+First, run the development server:
 
 ```bash
-npm i -g netlify-cli
-netlify dev
+npm run dev
+# or
+yarn dev
+# or
+pnpm dev
+# or
+bun dev
 ```
 
-## Deploy
+Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
-1. Push this repo to GitHub.
-2. In Netlify: **Add new site → Import from an existing project → Pick the repo**.
-3. Done — the scheduled function registers automatically on first deploy (look for it under **Functions** with a "Scheduled" badge; you can press "Run now" to test).
+You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
-### Update the schedule
+This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
-Edit `netlify.toml`:
+## Learn More
 
-```toml
-[[schedule.functions]]
-  schedule = "*/5 * * * *"   # every 5 minutes
-  name = "monitor"
-```
+To learn more about Next.js, take a look at the following resources:
 
-Then just `git push` — Netlify redeploys automatically.
+- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
+- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
 
-## Notes
+You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
 
-- Each scheduled run allows up to **30 seconds** of execution, so keep timeouts and URL count modest.
-- Check results are capped at the most recent **200 entries** in the persisted log.
-- The in-browser "Start Monitoring" buttons run a live local preview in addition to the server-side schedule.
+## Deploy on Vercel
+
+The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+
+Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.

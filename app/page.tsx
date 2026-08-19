@@ -1,21 +1,13 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>BackSaver — URL Health Monitor</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <!-- Fraunces = Grenette substitute · Inter = Graphik substitute -->
-  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css" />
-</head>
-<body>
+import Script from 'next/script'
+import fs from 'fs'
+import path from 'path'
 
-  <!-- ═══════════════════════════════════════════
-       SIDEBAR  (fixed on desktop, slide-in on mobile)
-  ═══════════════════════════════════════════ -->
-  <aside class="sidebar" id="sidebar" aria-label="Primary navigation">
+export default function Home() {
+  // Read body.html at build time/request time to render safely
+  // Wait, I can just inject the raw string here using code generation!
+  return (
+    <>
+      <div dangerouslySetInnerHTML={{ __html: `  <aside class="sidebar" id="sidebar" aria-label="Primary navigation">
 
     <div class="sidebar-brand">
       <div class="sidebar-logo">
@@ -419,6 +411,9 @@
     </div>
   </div>
 
-  <script src="app.js"></script>
-</body>
-</html>
+  
+` }} />
+      <Script src="/app.js" strategy="lazyOnload" />
+    </>
+  )
+}

@@ -156,110 +156,28 @@ sidebarOverlay.addEventListener('click', closeMobileSidebar);
 const API_URLS  = '/api/urls';
 const API_STATS = '/api/stats';
 
-/** Load saved URLs + last scheduled-check results from Blob storage. */
 async function loadServerState() {
-  const [urlRes, statRes] = await Promise.allSettled([
-    fetch(API_URLS),
-    fetch(API_STATS),
-  ]);
-
-  if (urlRes.status === 'fulfilled' && urlRes.value.ok) {
-    const data = await urlRes.value.json();
-    if (Array.isArray(data.urls)) savedUrls = data.urls;
-  }
-
-  if (statRes.status === 'fulfilled' && statRes.value.ok) {
-    const data = await statRes.value.json();
-    if (Array.isArray(data.results) && data.results.length) {
-      data.results.forEach(r => {
-        r.timestamp = new Date(r.timestamp);
-        lastResults.set(r.url, r);
-      });
-    }
-    if (Array.isArray(data.log) && data.log.length) mergeServerLog(data.log);
+  try {
+    const urls = localStorage.getItem('backsaver_urls');
+    if (urls) savedUrls = JSON.parse(urls);
+  } catch (e) {
+    console.warn('Failed to load urls', e);
   }
 }
 
-/** Persist the current URL list to Blob storage. */
 async function persistUrls() {
   try {
-    await fetch(API_URLS, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ urls: savedUrls }),
-    });
+    localStorage.setItem('backsaver_urls', JSON.stringify(savedUrls));
   } catch (e) {
-    console.warn('BackSaver: failed to persist URLs', e);
+    console.warn('Failed to persist', e);
   }
 }
 
-/** Merge scheduled-run log entries into the global log without duplicates. */
-function mergeServerLog(serverLog) {
-  const seen = new Set(gStats.log.map(r => r.url + '|' + r.timestamp.toISOString()));
-  const fresh = [];
+function mergeServerLog(serverLog) {}
+function recomputeStatsFromLog() {}
 
-  for (const r of serverLog) {
-    const ts = new Date(r.timestamp);
-    const key = r.url + '|' + ts.toISOString();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    fresh.push({ ...r, timestamp: ts });
-  }
-
-  if (fresh.length) {
-    gStats.log = fresh.concat(gStats.log).slice(0, 500);
-    recomputeStatsFromLog();
-  }
-}
-
-/** Rebuild aggregate + per-URL stats from gStats.log (avoids double counting). */
-function recomputeStatsFromLog() {
-  const log = gStats.log;
-  gStats.totalChecks    = log.length;
-  gStats.successChecks  = log.filter(r => r.ok).length;
-  gStats.totalResponseMs = log.reduce((s, r) => s + (r.responseMs || 0), 0);
-
-  const summary = new Map();
-  for (const r of log) {
-    const s = summary.get(r.url) || { totalChecks: 0, successChecks: 0, totalResponseMs: 0 };
-    s.totalChecks++;
-    if (r.ok) s.successChecks++;
-    if (r.responseMs !== null) s.totalResponseMs += r.responseMs;
-    summary.set(r.url, s);
-  }
-
-  summary.forEach((s, url) => {
-    lastResults.set(url, { ...s, ...log.find(r => r.url === url) });
-    const m = monitors.get(url);
-    if (m) {
-      m.totalChecks = s.totalChecks;
-      m.successChecks = s.successChecks;
-      m.totalResponseMs = s.totalResponseMs;
-      m.lastResult = lastResults.get(url);
-      refreshMonitorCard(url, m);
-    }
-  });
-}
-
-/** Poll the scheduled monitor's persisted results every 15s. */
 function startServerRefresh() {
-  setInterval(async () => {
-    try {
-      const res = await fetch(API_STATS);
-      if (!res.ok) return;
-      const data = await res.json();
-      if (Array.isArray(data.results) && data.results.length) {
-        data.results.forEach(r => {
-          r.timestamp = new Date(r.timestamp);
-          lastResults.set(r.url, r);
-        });
-      }
-      if (Array.isArray(data.log) && data.log.length) mergeServerLog(data.log);
-      renderAll();
-    } catch (e) {
-      /* offline or function not yet deployed — ignore */
-    }
-  }, 15000);
+  // Disabled
 }
 
 function renderAll() {
@@ -645,40 +563,27 @@ async function performCheck(url, method) {
   const result    = { url, method, timestamp, code: null, status: 'UNKNOWN', responseMs: null, ok: false, error: null };
 
   try {
-    const ctrl = new AbortController();
-    const tOut = setTimeout(() => ctrl.abort(), 10000);
-    try {
-      const res = await fetch(url, { method, signal: ctrl.signal });
-      clearTimeout(tOut);
-      result.responseMs = Math.round(performance.now() - t0);
-      result.code   = res.status;
-      result.ok     = res.ok;
-      result.status = res.ok ? 'UP' : 'DOWN';
-    } catch (corsErr) {
-      clearTimeout(tOut);
-      if (corsErr.name === 'AbortError') {
-        result.status = 'TIMEOUT';
-        result.error  = 'Request timed out after 10s';
-      } else {
-        // Fallback: no-cors reachability probe
-        try {
-          const c2 = new AbortController();
-          const t2 = setTimeout(() => c2.abort(), 10000);
-          await fetch(url, { method: 'GET', mode: 'no-cors', signal: c2.signal });
-          clearTimeout(t2);
-          result.responseMs = Math.round(performance.now() - t0);
-          result.code   = '•';
-          result.status = 'REACHABLE';
-          result.ok     = true;
-          result.error  = 'CORS blocked — no-cors probe (status unknown)';
-        } catch (e) {
-          result.responseMs = Math.round(performance.now() - t0);
-          result.status = e.name === 'AbortError' ? 'TIMEOUT' : 'DOWN';
-          result.error  = e.message;
-        }
-      }
+    const res = await fetch('/api/proxy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, method })
+    });
+    const data = await res.json();
+    
+    result.responseMs = data.responseMs;
+    result.code   = data.code;
+    result.ok     = data.ok;
+    if (data.ok) {
+      result.status = 'UP';
+    } else if (data.aborted) {
+      result.status = 'TIMEOUT';
+      result.error = data.error;
+    } else {
+      result.status = 'DOWN';
+      result.error = data.error;
     }
   } catch (e) {
+    result.responseMs = Math.round(performance.now() - t0);
     result.status = 'ERROR';
     result.error  = e.message;
   }
