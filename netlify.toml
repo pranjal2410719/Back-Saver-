@@ -1,0 +1,6 @@
+[build]
+  functions = "netlify/functions"
+
+[[schedule.functions]]
+  schedule = "*/1 * * * *"
+  name = "monitor"

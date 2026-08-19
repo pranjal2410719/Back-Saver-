@@ -34,6 +34,12 @@ const gStats = {
  */
 const monitors = new Map();
 
+/**
+ * Persisted results from the Netlify scheduled monitor.
+ * Map<url, lastResult> — independent of local monitoring sessions.
+ */
+const lastResults = new Map();
+
 // ════════════════════════════════════════════════════════════
 // DOM REFERENCES
 // ════════════════════════════════════════════════════════════
@@ -144,6 +150,127 @@ hamburger.addEventListener('click', () => {
 sidebarOverlay.addEventListener('click', closeMobileSidebar);
 
 // ════════════════════════════════════════════════════════════
+// PERSISTED STATE (Netlify Blobs via Functions)
+// ════════════════════════════════════════════════════════════
+
+const API_URLS  = '/api/urls';
+const API_STATS = '/api/stats';
+
+/** Load saved URLs + last scheduled-check results from Blob storage. */
+async function loadServerState() {
+  const [urlRes, statRes] = await Promise.allSettled([
+    fetch(API_URLS),
+    fetch(API_STATS),
+  ]);
+
+  if (urlRes.status === 'fulfilled' && urlRes.value.ok) {
+    const data = await urlRes.value.json();
+    if (Array.isArray(data.urls)) savedUrls = data.urls;
+  }
+
+  if (statRes.status === 'fulfilled' && statRes.value.ok) {
+    const data = await statRes.value.json();
+    if (Array.isArray(data.results) && data.results.length) {
+      data.results.forEach(r => {
+        r.timestamp = new Date(r.timestamp);
+        lastResults.set(r.url, r);
+      });
+    }
+    if (Array.isArray(data.log) && data.log.length) mergeServerLog(data.log);
+  }
+}
+
+/** Persist the current URL list to Blob storage. */
+async function persistUrls() {
+  try {
+    await fetch(API_URLS, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ urls: savedUrls }),
+    });
+  } catch (e) {
+    console.warn('BackSaver: failed to persist URLs', e);
+  }
+}
+
+/** Merge scheduled-run log entries into the global log without duplicates. */
+function mergeServerLog(serverLog) {
+  const seen = new Set(gStats.log.map(r => r.url + '|' + r.timestamp.toISOString()));
+  const fresh = [];
+
+  for (const r of serverLog) {
+    const ts = new Date(r.timestamp);
+    const key = r.url + '|' + ts.toISOString();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    fresh.push({ ...r, timestamp: ts });
+  }
+
+  if (fresh.length) {
+    gStats.log = fresh.concat(gStats.log).slice(0, 500);
+    recomputeStatsFromLog();
+  }
+}
+
+/** Rebuild aggregate + per-URL stats from gStats.log (avoids double counting). */
+function recomputeStatsFromLog() {
+  const log = gStats.log;
+  gStats.totalChecks    = log.length;
+  gStats.successChecks  = log.filter(r => r.ok).length;
+  gStats.totalResponseMs = log.reduce((s, r) => s + (r.responseMs || 0), 0);
+
+  const summary = new Map();
+  for (const r of log) {
+    const s = summary.get(r.url) || { totalChecks: 0, successChecks: 0, totalResponseMs: 0 };
+    s.totalChecks++;
+    if (r.ok) s.successChecks++;
+    if (r.responseMs !== null) s.totalResponseMs += r.responseMs;
+    summary.set(r.url, s);
+  }
+
+  summary.forEach((s, url) => {
+    lastResults.set(url, { ...s, ...log.find(r => r.url === url) });
+    const m = monitors.get(url);
+    if (m) {
+      m.totalChecks = s.totalChecks;
+      m.successChecks = s.successChecks;
+      m.totalResponseMs = s.totalResponseMs;
+      m.lastResult = lastResults.get(url);
+      refreshMonitorCard(url, m);
+    }
+  });
+}
+
+/** Poll the scheduled monitor's persisted results every 15s. */
+function startServerRefresh() {
+  setInterval(async () => {
+    try {
+      const res = await fetch(API_STATS);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (Array.isArray(data.results) && data.results.length) {
+        data.results.forEach(r => {
+          r.timestamp = new Date(r.timestamp);
+          lastResults.set(r.url, r);
+        });
+      }
+      if (Array.isArray(data.log) && data.log.length) mergeServerLog(data.log);
+      renderAll();
+    } catch (e) {
+      /* offline or function not yet deployed — ignore */
+    }
+  }, 15000);
+}
+
+function renderAll() {
+  renderUrlList();
+  renderOverviewEndpoints();
+  renderOverviewRecentLog();
+  updateGlobalStatCards();
+  updateSidebarBadges();
+}
+
+// ════════════════════════════════════════════════════════════
 // URL MANAGEMENT
 // ════════════════════════════════════════════════════════════
 
@@ -164,6 +291,7 @@ function addUrl() {
   savedUrls.push(raw);
   urlInput.value = '';
   urlInput.focus();
+  persistUrls();
   renderUrlList();
   renderOverviewEndpoints();
   updateSidebarBadges();
@@ -173,6 +301,8 @@ function addUrl() {
 function removeUrl(url) {
   if (cfg.isMonitoring) return;
   savedUrls = savedUrls.filter(u => u !== url);
+  lastResults.delete(url);
+  persistUrls();
   renderUrlList();
   renderOverviewEndpoints();
   updateSidebarBadges();
@@ -233,8 +363,7 @@ function renderOverviewEndpoints() {
   ovEndpointList.innerHTML = '';
 
   savedUrls.forEach(url => {
-    const m = monitors.get(url);
-    const r = m ? m.lastResult : null;
+    const r = (monitors.get(url) && monitors.get(url).lastResult) || lastResults.get(url) || null;
     const dotCls  = !r ? '' : r.ok ? 'ok' : (r.status === 'REACHABLE' ? 'warn' : 'error');
     const codeStr = !r ? '—' : (r.code !== null ? String(r.code) : r.status);
 
@@ -562,6 +691,7 @@ async function performCheck(url, method) {
   if (gStats.log.length > 500) gStats.log.pop();
 
   // ── Update per-monitor state ──
+  lastResults.set(url, result);
   const m = monitors.get(url);
   if (m) {
     m.totalChecks++;
@@ -733,39 +863,44 @@ function flashBorder(el, color) {
 // INIT
 // ════════════════════════════════════════════════════════════
 
-renderUrlList();
-renderOverviewEndpoints();
-renderOverviewRecentLog();
-updateGlobalStatCards();
-updateSidebarBadges();
-syncAllStartButtons();
-
-// ── Developer Welcome Popup & Copyright ──
-const currentYear = new Date().getFullYear();
-const sidebarYear = $('sidebar-year');
-const popupYear   = $('popup-year');
-if (sidebarYear) sidebarYear.textContent = currentYear;
-if (popupYear)   popupYear.textContent   = currentYear;
-
-const popupBackdrop = $('popup-backdrop');
-const popupCloseBtn = $('popup-close-btn');
-
-if (popupBackdrop && popupCloseBtn) {
-  // Check if we already showed it
-  const hasSeenPopup = localStorage.getItem('backsaver_seen_developer_popup');
-  
-  if (!hasSeenPopup) {
-    // Show it
-    popupBackdrop.style.display = 'flex';
-    
-    // Close logic
-    popupCloseBtn.addEventListener('click', () => {
-      popupBackdrop.classList.add('is-hidden');
-      localStorage.setItem('backsaver_seen_developer_popup', 'true');
-      setTimeout(() => { popupBackdrop.style.display = 'none'; }, 300);
-    });
-  } else {
-    popupBackdrop.style.display = 'none';
+(async function init() {
+  try {
+    await loadServerState();
+  } catch (e) {
+    console.warn('BackSaver: failed to load persisted state', e);
   }
-}
+
+  renderAll();
+  syncAllStartButtons();
+  startServerRefresh();
+
+  // ── Developer Welcome Popup & Copyright ──
+  const currentYear = new Date().getFullYear();
+  const sidebarYear = $('sidebar-year');
+  const popupYear   = $('popup-year');
+  if (sidebarYear) sidebarYear.textContent = currentYear;
+  if (popupYear)   popupYear.textContent   = currentYear;
+
+  const popupBackdrop = $('popup-backdrop');
+  const popupCloseBtn = $('popup-close-btn');
+
+  if (popupBackdrop && popupCloseBtn) {
+    // Check if we already showed it
+    const hasSeenPopup = localStorage.getItem('backsaver_seen_developer_popup');
+
+    if (!hasSeenPopup) {
+      // Show it
+      popupBackdrop.style.display = 'flex';
+
+      // Close logic
+      popupCloseBtn.addEventListener('click', () => {
+        popupBackdrop.classList.add('is-hidden');
+        localStorage.setItem('backsaver_seen_developer_popup', 'true');
+        setTimeout(() => { popupBackdrop.style.display = 'none'; }, 300);
+      });
+    } else {
+      popupBackdrop.style.display = 'none';
+    }
+  }
+})();
 

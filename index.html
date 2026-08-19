@@ -343,8 +343,8 @@
               <path d="M9 5.5v4M9 12.5v.5" stroke="#043f2e" stroke-width="1.3" stroke-linecap="round"/>
             </svg>
             <div>
-              <p class="notice-title">Browser CORS Notice</p>
-              <p class="notice-text">Requests run directly from your browser. If your backend doesn't send <code>Access-Control-Allow-Origin</code> headers, BackSaver falls back to a no-cors connectivity probe — reachability is confirmed but exact HTTP status codes won't be visible.</p>
+              <p class="notice-title">Monitoring Runs on Netlify's Servers</p>
+              <p class="notice-text">Saved URLs are stored in Netlify Blobs and checked automatically by a scheduled function (<code>&#42;/1 * * * *</code>) — continuously, even when you're not online. Browser checks below are a live preview and may hit CORS limits (missing <code>Access-Control-Allow-Origin</code> headers).</p>
             </div>
           </div>
 
