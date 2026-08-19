@@ -154,16 +154,32 @@ sidebarOverlay.addEventListener('click', closeMobileSidebar);
 // ════════════════════════════════════════════════════════════
 
 const API_URLS  = '/api/urls';
+const API_STATS = '/api/stats';
+const API_SETTINGS = '/api/settings';
 
 async function loadServerState() {
   try {
-    const res = await fetch(API_URLS);
-    if (res.ok) {
-      const data = await res.json();
+    const resUrls = await fetch(API_URLS);
+    if (resUrls.ok) {
+      const data = await resUrls.json();
       if (Array.isArray(data.urls)) savedUrls = data.urls;
     }
+    const resSettings = await fetch(API_SETTINGS);
+    if (resSettings.ok) {
+      const { isMonitoring } = await resSettings.json();
+      if (isMonitoring) {
+        cfg.isMonitoring = true;
+  persistSettings(true);
+        syncAllStartButtons();
+      }
+    }
+    const resStats = await fetch(API_STATS);
+    if (resStats.ok) {
+      const data = await resStats.json();
+      if (Array.isArray(data.log) && data.log.length) mergeServerLog(data.log);
+    }
   } catch (e) {
-    console.warn('Failed to load urls from server', e);
+    console.warn('Failed to load state from server', e);
   }
 }
 
@@ -179,12 +195,74 @@ async function persistUrls() {
   }
 }
 
-function mergeServerLog(serverLog) {}
-function recomputeStatsFromLog() {}
+async function persistSettings(isMonitoring) {
+  try {
+    await fetch(API_SETTINGS, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ isMonitoring }),
+    });
+  } catch (e) {}
+}
+
+function mergeServerLog(serverLog) {
+  const seen = new Set(gStats.log.map(r => r.url + '|' + new Date(r.timestamp).toISOString()));
+  const fresh = [];
+
+  for (const r of serverLog) {
+    const ts = new Date(r.timestamp);
+    const key = r.url + '|' + ts.toISOString();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    fresh.push({ ...r, timestamp: ts });
+  }
+
+  if (fresh.length) {
+    gStats.log = fresh.concat(gStats.log).slice(0, 500);
+    recomputeStatsFromLog();
+  }
+}
+
+function recomputeStatsFromLog() {
+  const log = gStats.log;
+  gStats.totalChecks    = log.length;
+  gStats.successChecks  = log.filter(r => r.ok).length;
+  gStats.totalResponseMs = log.reduce((s, r) => s + (r.responseMs || 0), 0);
+
+  const summary = new Map();
+  for (const r of log) {
+    const s = summary.get(r.url) || { totalChecks: 0, successChecks: 0, totalResponseMs: 0 };
+    s.totalChecks++;
+    if (r.ok) s.successChecks++;
+    if (r.responseMs !== null) s.totalResponseMs += r.responseMs;
+    summary.set(r.url, s);
+  }
+
+  summary.forEach((s, url) => {
+    lastResults.set(url, { ...s, ...log.find(r => r.url === url) });
+    const m = monitors.get(url);
+    if (m) {
+      m.totalChecks = s.totalChecks;
+      m.successChecks = s.successChecks;
+      m.totalResponseMs = s.totalResponseMs;
+      m.lastResult = lastResults.get(url);
+      refreshMonitorCard(url, m);
+    }
+  });
+  renderAll();
+}
 
 function startServerRefresh() {
-  // Disabled
+  setInterval(async () => {
+    try {
+      const res = await fetch(API_STATS);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (Array.isArray(data.log) && data.log.length) mergeServerLog(data.log);
+    } catch (e) {}
+  }, 15000);
 }
+
 
 function renderAll() {
   renderUrlList();
@@ -481,7 +559,9 @@ function startAllMonitoring() {
   }
 
   cfg.isMonitoring = true;
+  persistSettings(true);
   localStorage.setItem('backsaver_is_monitoring', 'true');
+  persistSettings(true);
 
   // Lock inputs
   urlInput  && (urlInput.disabled = true);
@@ -505,7 +585,7 @@ function startAllMonitoring() {
     };
     monitors.set(url, m);
     createMonitorCard(url);
-    performCheck(url, cfg.method).then(() => scheduleNext(url));
+    scheduleNext(url);
   });
 
   syncAllStartButtons();
@@ -514,7 +594,9 @@ function startAllMonitoring() {
 
 function stopAllMonitoring() {
   cfg.isMonitoring = false;
+  persistSettings(false);
   localStorage.setItem('backsaver_is_monitoring', 'false');
+  persistSettings(false);
 
   monitors.forEach(m => { clearTimeout(m.timerId); clearInterval(m.countdownId); });
   monitors.clear();
@@ -556,7 +638,7 @@ function scheduleNext(url) {
 
   m.timerId = setTimeout(async () => {
     if (!cfg.isMonitoring || !monitors.has(url)) return;
-    await performCheck(url, cfg.method);
+    
     scheduleNext(url);
   }, cfg.intervalMs);
 }
