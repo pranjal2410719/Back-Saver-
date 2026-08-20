@@ -165,43 +165,111 @@ export default function Home() {
       </div>
     </section>
 
-    <!-- ─────────────── PAGE: MANAGE URLs ─────────────── -->
+    <!-- ─────────────── PAGE: MANAGE MONITORS ─────────────── -->
     <section class="page" id="page-urls">
       <div class="page-body">
 
         <header class="page-header">
-          <span class="eyebrow">Management</span>
-          <h1 class="page-title">Target URLs</h1>
-          <p class="page-sub">Add and manage the endpoints you want BackSaver to track independently.</p>
+          <span class="eyebrow">Monitor Studio</span>
+          <h1 class="page-title">Manage<br>Monitors</h1>
+          <p class="page-sub">Configure HTTP(S), Keyword, SSL Expiry, Port/TCP, or Heartbeat cron monitors.</p>
         </header>
 
-        <!-- Add URL card -->
+        <!-- Add Monitor Card -->
         <div class="card">
-          <span class="card-label">Add a URL</span>
-          <div class="add-row">
-            <input
-              id="url-input"
-              class="url-input"
-              type="url"
-              placeholder="https://api.yourbackend.com/health"
-              autocomplete="off"
-              spellcheck="false"
-            />
+          <span class="card-label">Create New Monitor</span>
+          
+          <!-- Monitor Type Selector -->
+          <div class="type-selector-grid">
+            <button class="type-btn is-selected" data-type="http">
+              <span class="type-icon">🌐</span>
+              <span class="type-name">HTTP(S)</span>
+            </button>
+            <button class="type-btn" data-type="keyword">
+              <span class="type-icon">🔍</span>
+              <span class="type-name">Keyword</span>
+            </button>
+            <button class="type-btn" data-type="ssl">
+              <span class="type-icon">🔒</span>
+              <span class="type-name">SSL Expiry</span>
+            </button>
+            <button class="type-btn" data-type="port">
+              <span class="type-icon">🔌</span>
+              <span class="type-name">Port / TCP</span>
+            </button>
+            <button class="type-btn" data-type="heartbeat">
+              <span class="type-icon">💓</span>
+              <span class="type-name">Heartbeat</span>
+            </button>
+          </div>
+
+          <div class="monitor-form-grid">
+            <div class="form-group" id="group-url">
+              <label class="form-label" for="url-input" id="lbl-url">Target URL / Host</label>
+              <input
+                id="url-input"
+                class="url-input"
+                type="text"
+                placeholder="https://api.yourbackend.com/health"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </div>
+            
+            <div class="form-group">
+              <label class="form-label" for="name-input">Monitor Name (Optional)</label>
+              <input
+                id="name-input"
+                class="url-input"
+                type="text"
+                placeholder="Production API"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </div>
+
+            <!-- Conditional: Keyword -->
+            <div class="form-group" id="group-keyword" style="display:none">
+              <label class="form-label" for="keyword-input">Expected Keyword / String</label>
+              <input
+                id="keyword-input"
+                class="url-input"
+                type="text"
+                placeholder='e.g. "status":"ok" or "healthy"'
+                autocomplete="off"
+              />
+            </div>
+
+            <!-- Conditional: Port -->
+            <div class="form-group" id="group-port" style="display:none">
+              <label class="form-label" for="port-input">Port Number</label>
+              <input
+                id="port-input"
+                class="url-input"
+                type="number"
+                placeholder="5432 (Postgres), 6379 (Redis), 80, 443"
+                min="1"
+                max="65535"
+              />
+            </div>
+          </div>
+
+          <div class="add-row-actions">
             <button class="btn-primary" id="btn-add-url">
               <svg width="13" height="13" viewBox="0 0 13 13" fill="none" aria-hidden="true">
                 <path d="M6.5 1v11M1 6.5h11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
               </svg>
-              Add URL
+              Save & Start Monitor
             </button>
           </div>
-          <p class="hint">Press <kbd>Enter</kbd> or click <strong>Add URL</strong> — each endpoint is tracked independently with its own stats</p>
+          <p class="hint">Tracks status, uptime percentage, latency, and opens automated incidents during downtime.</p>
         </div>
 
-        <!-- Saved URL list -->
+        <!-- Saved Monitor list -->
         <div>
           <div class="sub-header">
-            <span class="eyebrow" style="font-size:11px">Saved URLs</span>
-            <span class="tag-pill" id="url-list-count">0 URLs</span>
+            <span class="eyebrow" style="font-size:11px">Configured Monitors</span>
+            <span class="tag-pill" id="url-list-count">0 Monitors</span>
           </div>
           <div id="url-list-container">
             <div class="empty-card" id="url-list-empty">
@@ -209,7 +277,7 @@ export default function Home() {
                 <circle cx="18" cy="18" r="16" stroke="#043f2e" stroke-width="1.4"/>
                 <path d="M12 18 Q14.5 13 18 12 Q21.5 11 24 18" stroke="#043f2e" stroke-width="1.4" fill="none"/>
               </svg>
-              <p>No URLs yet. Enter one above and click <strong>Add URL</strong>.</p>
+              <p>No monitors yet. Select a monitor type above and click <strong>Save & Start Monitor</strong>.</p>
             </div>
           </div>
         </div>

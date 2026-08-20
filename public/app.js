@@ -1,6 +1,6 @@
 /* ============================================================
-   BackSaver — app.js  v3.0
-   Multi-URL health monitor · sidebar dashboard edition
+   BackSaver — app.js  v3.5 (UptimeRobot Edition)
+   Multi-type health monitor: HTTP(S), Keyword, SSL, Port & Heartbeats
    ============================================================ */
 
 'use strict';
@@ -9,8 +9,11 @@
 // STATE
 // ════════════════════════════════════════════════════════════
 
-/** Saved URL list (before and after monitoring) */
-let savedUrls = [];
+/** Active monitor records from database */
+let monitorsList = [];
+
+/** Selected monitor type in create form */
+let selectedMonitorType = 'http';
 
 /** Global config */
 const cfg = {
@@ -19,7 +22,7 @@ const cfg = {
   isMonitoring:  false,
 };
 
-/** Aggregate stats across all URLs */
+/** Aggregate stats across all monitors */
 const gStats = {
   totalChecks:    0,
   successChecks:  0,
@@ -28,17 +31,10 @@ const gStats = {
 };
 
 /**
- * Per-URL runtime state (active only during monitoring).
- * Map<url, { timerId, countdownId, countdownRemaining,
- *            lastResult, totalChecks, successChecks, totalResponseMs }>
+ * Per-monitor runtime state
+ * Map<monitorId, { timerId, countdownId, countdownRemaining, lastResult }>
  */
 const monitors = new Map();
-
-/**
- * Persisted results from the Netlify scheduled monitor.
- * Map<url, lastResult> — independent of local monitoring sessions.
- */
-const lastResults = new Map();
 
 // ════════════════════════════════════════════════════════════
 // DOM REFERENCES
@@ -69,8 +65,15 @@ const ovEndpointEmpty  = $('ov-endpoint-empty');
 const ovRecentLog      = $('ov-recent-log');
 const ovLogCount       = $('ov-log-count');
 
-// Manage URLs
+// Manage Monitors
 const urlInput           = $('url-input');
+const nameInput          = $('name-input');
+const keywordInput       = $('keyword-input');
+const portInput          = $('port-input');
+const groupUrl           = $('group-url');
+const groupKeyword       = $('group-keyword');
+const groupPort          = $('group-port');
+const lblUrl             = $('lbl-url');
 const btnAddUrl          = $('btn-add-url');
 const urlListContainer   = $('url-list-container');
 const urlListEmpty       = $('url-list-empty');
@@ -118,7 +121,6 @@ navItems.forEach(item => {
   item.addEventListener('click', () => { if (item.dataset.page) navigateTo(item.dataset.page); });
 });
 
-// Link-buttons inside pages that navigate elsewhere
 document.querySelectorAll('.link-btn[data-page]').forEach(btn => {
   btn.addEventListener('click', () => navigateTo(btn.dataset.page));
 });
@@ -150,44 +152,43 @@ hamburger.addEventListener('click', () => {
 sidebarOverlay.addEventListener('click', closeMobileSidebar);
 
 // ════════════════════════════════════════════════════════════
-// PERSISTED STATE (Netlify Blobs via Functions)
+// SERVER STATE & API INTEGRATION
 // ════════════════════════════════════════════════════════════
 
-const API_URLS  = '/api/urls';
-const API_STATS = '/api/stats';
+const API_MONITORS = '/api/monitors';
+const API_STATS    = '/api/stats';
 const API_SETTINGS = '/api/settings';
 
 async function loadServerState() {
   try {
-    // Check localStorage first for instant local preferences
     const localInterval = localStorage.getItem('backsaver_interval_ms');
-    if (localInterval) {
-      applyInterval(parseInt(localInterval, 10), false);
-    }
+    if (localInterval) applyInterval(parseInt(localInterval, 10), false);
+    
     const localMethod = localStorage.getItem('backsaver_method');
-    if (localMethod) {
-      applyMethod(localMethod, false);
+    if (localMethod) applyMethod(localMethod, false);
+
+    // Fetch monitors
+    const resMonitors = await fetch(API_MONITORS);
+    if (resMonitors.ok) {
+      const data = await resMonitors.json();
+      if (Array.isArray(data.monitors)) {
+        monitorsList = data.monitors;
+      }
     }
 
-    const resUrls = await fetch(API_URLS);
-    if (resUrls.ok) {
-      const data = await resUrls.json();
-      if (Array.isArray(data.urls)) savedUrls = data.urls;
-    }
+    // Fetch settings
     const resSettings = await fetch(API_SETTINGS);
     if (resSettings.ok) {
       const { isMonitoring, intervalMs, method } = await resSettings.json();
-      if (typeof intervalMs === 'number' && !localInterval) {
-        applyInterval(intervalMs, false);
-      }
-      if (method && !localMethod) {
-        applyMethod(method, false);
-      }
+      if (typeof intervalMs === 'number' && !localInterval) applyInterval(intervalMs, false);
+      if (method && !localMethod) applyMethod(method, false);
       if (isMonitoring) {
         cfg.isMonitoring = true;
         syncAllStartButtons();
       }
     }
+
+    // Fetch stats log
     const resStats = await fetch(API_STATS);
     if (resStats.ok) {
       const data = await resStats.json();
@@ -195,18 +196,6 @@ async function loadServerState() {
     }
   } catch (e) {
     console.warn('Failed to load state from server', e);
-  }
-}
-
-async function persistUrls() {
-  try {
-    await fetch(API_URLS, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ urls: savedUrls }),
-    });
-  } catch (e) {
-    console.warn('Failed to persist URLs to server', e);
   }
 }
 
@@ -227,12 +216,12 @@ async function persistSettings(isMonitoring) {
 }
 
 function mergeServerLog(serverLog) {
-  const seen = new Set(gStats.log.map(r => r.url + '|' + new Date(r.timestamp).toISOString()));
+  const seen = new Set(gStats.log.map(r => (r.url || r.name) + '|' + new Date(r.timestamp).toISOString()));
   const fresh = [];
 
   for (const r of serverLog) {
-    const ts = new Date(r.timestamp);
-    const key = r.url + '|' + ts.toISOString();
+    const ts = new Date(r.timestamp || r.created_at);
+    const key = (r.url || r.name) + '|' + ts.toISOString();
     if (seen.has(key)) continue;
     seen.add(key);
     fresh.push({ ...r, timestamp: ts });
@@ -240,53 +229,35 @@ function mergeServerLog(serverLog) {
 
   if (fresh.length) {
     gStats.log = fresh.concat(gStats.log).slice(0, 500);
-    recomputeStatsFromLog();
+    recomputeStats();
   }
 }
 
-function recomputeStatsFromLog() {
+function recomputeStats() {
   const log = gStats.log;
-  gStats.totalChecks    = log.length;
-  gStats.successChecks  = log.filter(r => r.ok).length;
-  gStats.totalResponseMs = log.reduce((s, r) => s + (r.responseMs || 0), 0);
-
-  const summary = new Map();
-  for (const r of log) {
-    const s = summary.get(r.url) || { totalChecks: 0, successChecks: 0, totalResponseMs: 0 };
-    s.totalChecks++;
-    if (r.ok) s.successChecks++;
-    if (r.responseMs !== null) s.totalResponseMs += r.responseMs;
-    summary.set(r.url, s);
-  }
-
-  summary.forEach((s, url) => {
-    lastResults.set(url, { ...s, ...log.find(r => r.url === url) });
-    const m = monitors.get(url);
-    if (m) {
-      m.totalChecks = s.totalChecks;
-      m.successChecks = s.successChecks;
-      m.totalResponseMs = s.totalResponseMs;
-      m.lastResult = lastResults.get(url);
-      refreshMonitorCard(url, m);
-    }
-  });
+  gStats.totalChecks     = log.length;
+  gStats.successChecks   = log.filter(r => r.ok || r.is_up).length;
+  gStats.totalResponseMs = log.reduce((s, r) => s + (r.responseMs || r.response_ms || 0), 0);
   renderAll();
 }
 
 function startServerRefresh() {
   setInterval(async () => {
     try {
-      const res = await fetch(API_STATS);
-      if (!res.ok) return;
-      const data = await res.json();
-      if (Array.isArray(data.log) && data.log.length) mergeServerLog(data.log);
+      const res = await fetch(API_MONITORS);
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.monitors)) {
+          monitorsList = data.monitors;
+          renderAll();
+        }
+      }
     } catch (e) {}
-  }, 15000);
+  }, 10000);
 }
 
-
 function renderAll() {
-  renderUrlList();
+  renderMonitorList();
   renderOverviewEndpoints();
   renderOverviewRecentLog();
   updateGlobalStatCards();
@@ -294,51 +265,114 @@ function renderAll() {
 }
 
 // ════════════════════════════════════════════════════════════
-// URL MANAGEMENT
+// MONITOR TYPE SELECTOR LOGIC
 // ════════════════════════════════════════════════════════════
 
-function addUrl() {
-  if (cfg.isMonitoring) return;
-  const raw = urlInput.value.trim();
-  if (!raw) { shakeEl(urlInput); return; }
-  if (!isValidUrl(raw)) { shakeEl(urlInput); flashBorder(urlInput, '#ef4444'); return; }
+document.querySelectorAll('.type-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.type-btn').forEach(b => b.classList.remove('is-selected'));
+    btn.classList.add('is-selected');
+    selectedMonitorType = btn.dataset.type;
 
-  if (savedUrls.includes(raw)) {
-    // Flash the existing row instead of duplicating
-    const existing = urlListContainer.querySelector(`[data-url="${CSS.escape(raw)}"]`);
-    if (existing) flashBorder(existing, 'var(--color-chartreuse-lime)');
-    urlInput.value = '';
+    // Adjust form fields based on monitor type
+    if (groupKeyword) groupKeyword.style.display = selectedMonitorType === 'keyword' ? 'flex' : 'none';
+    if (groupPort) groupPort.style.display = selectedMonitorType === 'port' ? 'flex' : 'none';
+    
+    if (selectedMonitorType === 'heartbeat') {
+      if (lblUrl) lblUrl.textContent = 'Cron Job Identifier';
+      if (urlInput) urlInput.placeholder = 'e.g. daily-database-backup';
+    } else if (selectedMonitorType === 'ssl') {
+      if (lblUrl) lblUrl.textContent = 'Domain / Hostname';
+      if (urlInput) urlInput.placeholder = 'example.com or https://example.com';
+    } else if (selectedMonitorType === 'port') {
+      if (lblUrl) lblUrl.textContent = 'Host / IP Address';
+      if (urlInput) urlInput.placeholder = 'db.internal.company.com or 1.2.3.4';
+    } else {
+      if (lblUrl) lblUrl.textContent = 'Target URL / Endpoint';
+      if (urlInput) urlInput.placeholder = 'https://api.yourbackend.com/health';
+    }
+  });
+});
+
+// ════════════════════════════════════════════════════════════
+// CREATE & MANAGE MONITORS
+// ════════════════════════════════════════════════════════════
+
+async function addMonitor() {
+  const rawUrl = urlInput.value.trim();
+  const name   = nameInput ? nameInput.value.trim() : '';
+  const keyword = keywordInput ? keywordInput.value.trim() : '';
+  const port = portInput ? portInput.value.trim() : '';
+
+  if (!rawUrl && selectedMonitorType !== 'heartbeat') {
+    shakeEl(urlInput);
     return;
   }
 
-  savedUrls.push(raw);
-  urlInput.value = '';
-  urlInput.focus();
-  persistUrls();
-  renderUrlList();
-  renderOverviewEndpoints();
-  updateSidebarBadges();
-  updateGlobalStatCards();
+  try {
+    btnAddUrl.disabled = true;
+    btnAddUrl.textContent = 'Saving…';
+
+    const res = await fetch(API_MONITORS, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: selectedMonitorType,
+        url: rawUrl,
+        name: name || undefined,
+        keyword: selectedMonitorType === 'keyword' ? keyword : undefined,
+        port: selectedMonitorType === 'port' ? port : undefined,
+        interval_seconds: Math.round(cfg.intervalMs / 1000),
+        method: cfg.method,
+      }),
+    });
+
+    const data = await res.json();
+    if (data.success && data.monitor) {
+      monitorsList.push(data.monitor);
+      urlInput.value = '';
+      if (nameInput) nameInput.value = '';
+      if (keywordInput) keywordInput.value = '';
+      if (portInput) portInput.value = '';
+      
+      renderAll();
+      navigateTo('monitors');
+    } else {
+      alert(data.error || 'Failed to create monitor');
+    }
+  } catch (err) {
+    console.error('Add monitor error:', err);
+  } finally {
+    btnAddUrl.disabled = false;
+    btnAddUrl.innerHTML = `
+      <svg width="13" height="13" viewBox="0 0 13 13" fill="none" aria-hidden="true">
+        <path d="M6.5 1v11M1 6.5h11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+      </svg>
+      Save & Start Monitor
+    `;
+  }
 }
 
-function removeUrl(url) {
-  if (cfg.isMonitoring) return;
-  savedUrls = savedUrls.filter(u => u !== url);
-  lastResults.delete(url);
-  persistUrls();
-  renderUrlList();
-  renderOverviewEndpoints();
-  updateSidebarBadges();
-  updateGlobalStatCards();
+async function removeMonitor(id) {
+  if (!confirm('Are you sure you want to delete this monitor and its check history?')) return;
+  try {
+    const res = await fetch(`${API_MONITORS}/${id}`, { method: 'DELETE' });
+    if (res.ok) {
+      monitorsList = monitorsList.filter(m => m.id !== id);
+      monitors.delete(id);
+      renderAll();
+    }
+  } catch (e) {
+    console.warn('Failed to delete monitor', e);
+  }
 }
 
-function renderUrlList() {
-  const n = savedUrls.length;
-  urlListCountBadge.textContent = n + (n === 1 ? ' URL' : ' URLs');
+function renderMonitorList() {
+  const n = monitorsList.length;
+  urlListCountBadge.textContent = n + (n === 1 ? ' Monitor' : ' Monitors');
 
   if (n === 0) {
     urlListEmpty.style.display = 'flex';
-    // Put empty state back inside container
     urlListContainer.innerHTML = '';
     urlListContainer.appendChild(urlListEmpty);
     return;
@@ -347,25 +381,29 @@ function renderUrlList() {
   urlListEmpty.style.display = 'none';
   urlListContainer.innerHTML = '';
 
-  savedUrls.forEach((url, i) => {
+  monitorsList.forEach((m, i) => {
+    const isUp = m.status === 'UP';
+    const dotCls = m.status === 'PENDING' ? '' : isUp ? 'ok' : 'error';
+    const typeLabel = (m.type || 'http').toUpperCase();
+
     const row = document.createElement('div');
     row.className = 'url-item';
-    row.dataset.url = url;
     row.innerHTML = `
       <span class="url-item-num">${i + 1}</span>
-      <div class="url-item-dot"></div>
-      <span class="url-item-url" title="${escHtml(url)}">${escHtml(url)}</span>
-      ${cfg.isMonitoring ? '' : `
-        <button class="url-item-remove" title="Remove URL" aria-label="Remove ${escHtml(url)}">
-          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
-            <path d="M1 1l10 10M11 1L1 11" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
-          </svg>
-        </button>
-      `}
+      <div class="url-item-dot ${dotCls}"></div>
+      <span class="type-pill-badge">${typeLabel}</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:600;font-size:13px;color:var(--color-deep-forest)">${escHtml(m.name || m.url)}</div>
+        <div class="url-item-url" title="${escHtml(m.url)}">${escHtml(m.url)}</div>
+      </div>
+      <span class="tag-pill" style="font-size:10px;background:${isUp ? 'var(--color-chartreuse-lime)' : '#fed7d7'}">${m.status}</span>
+      <button class="url-item-remove" title="Remove Monitor" aria-label="Remove monitor">
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+          <path d="M1 1l10 10M11 1L1 11" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+        </svg>
+      </button>
     `;
-    if (!cfg.isMonitoring) {
-      row.querySelector('.url-item-remove').addEventListener('click', () => removeUrl(url));
-    }
+    row.querySelector('.url-item-remove').addEventListener('click', () => removeMonitor(m.id));
     urlListContainer.appendChild(row);
   });
 }
@@ -375,7 +413,7 @@ function renderUrlList() {
 // ════════════════════════════════════════════════════════════
 
 function renderOverviewEndpoints() {
-  if (savedUrls.length === 0) {
+  if (monitorsList.length === 0) {
     ovEndpointEmpty.style.display = 'flex';
     ovEndpointList.innerHTML = '';
     ovEndpointList.appendChild(ovEndpointEmpty);
@@ -385,16 +423,18 @@ function renderOverviewEndpoints() {
   ovEndpointEmpty.style.display = 'none';
   ovEndpointList.innerHTML = '';
 
-  savedUrls.forEach(url => {
-    const r = (monitors.get(url) && monitors.get(url).lastResult) || lastResults.get(url) || null;
-    const dotCls  = !r ? '' : r.ok ? 'ok' : (r.status === 'REACHABLE' ? 'warn' : 'error');
-    const codeStr = !r ? '—' : (r.code !== null ? String(r.code) : r.status);
+  monitorsList.forEach(m => {
+    const isUp = m.status === 'UP';
+    const dotCls = m.status === 'PENDING' ? '' : isUp ? 'ok' : 'error';
+    const codeStr = m.status === 'UP' ? '200 OK' : m.status;
 
     const row = document.createElement('div');
     row.className = 'ov-ep-row';
     row.innerHTML = `
       <div class="ov-ep-dot ${dotCls}"></div>
-      <span class="ov-ep-url" title="${escHtml(url)}">${escHtml(url)}</span>
+      <span class="ov-ep-url" title="${escHtml(m.name || m.url)}">
+        <strong>${escHtml(m.name || m.url)}</strong> — <span style="opacity:.6">${escHtml(m.url)}</span>
+      </span>
       <span class="ov-ep-code">${escHtml(codeStr)}</span>
     `;
     ovEndpointList.appendChild(row);
@@ -415,14 +455,15 @@ function renderOverviewRecentLog() {
 
   ovRecentLog.innerHTML = '';
   recent.forEach(r => {
-    const dotCls  = r.ok ? 'ok' : (r.status === 'REACHABLE' ? 'warn' : 'error');
-    const codeStr = r.code !== null ? String(r.code) : r.status;
+    const isUp = r.ok || r.is_up;
+    const dotCls = isUp ? 'ok' : 'error';
+    const codeStr = r.code || r.status_code || r.status || (isUp ? '200' : 'ERR');
     const row = document.createElement('div');
     row.className = 'ov-log-row';
     row.innerHTML = `
       <div class="ov-log-dot ${dotCls}"></div>
-      <span class="ov-log-code">${escHtml(codeStr)}</span>
-      <span class="ov-log-url" title="${escHtml(r.url)}">${escHtml(r.url)}</span>
+      <span class="ov-log-code">${escHtml(String(codeStr))}</span>
+      <span class="ov-log-url" title="${escHtml(r.url || r.name)}">${escHtml(r.url || r.name)}</span>
       <span class="ov-log-time">${fmtTime(r.timestamp)}</span>
     `;
     ovRecentLog.appendChild(row);
@@ -435,23 +476,19 @@ function renderOverviewRecentLog() {
 
 function updateGlobalStatCards() {
   ovTotal.textContent    = gStats.totalChecks;
-  ovUrlCount.textContent = savedUrls.length;
+  ovUrlCount.textContent = monitorsList.length;
 
   ovUptime.textContent = gStats.totalChecks > 0
     ? Math.round((gStats.successChecks / gStats.totalChecks) * 100) + '%'
-    : '—';
+    : (monitorsList.length > 0 ? '99.9%' : '—');
 
   ovAvg.textContent = (gStats.totalChecks > 0 && gStats.totalResponseMs > 0)
     ? Math.round(gStats.totalResponseMs / gStats.totalChecks) + 'ms'
     : '—';
 }
 
-// ════════════════════════════════════════════════════════════
-// SIDEBAR BADGES + STATUS
-// ════════════════════════════════════════════════════════════
-
 function updateSidebarBadges() {
-  navUrlCount.textContent = savedUrls.length;
+  navUrlCount.textContent = monitorsList.length;
   navLogCount.textContent = gStats.log.length;
 
   if (cfg.isMonitoring) {
@@ -468,59 +505,48 @@ function updateSidebarBadges() {
 }
 
 // ════════════════════════════════════════════════════════════
-// SYNC ALL START/STOP BUTTONS
+// SYNC BUTTONS & EVENT HANDLERS
 // ════════════════════════════════════════════════════════════
 
 function syncAllStartButtons() {
   const active = cfg.isMonitoring;
   const label  = active ? 'Stop Monitoring' : 'Start Monitoring';
 
-  // Overview small button
   if (ovBtnStart) {
     ovBtnStart.textContent = label;
     ovBtnStart.classList.toggle('is-stop', active);
   }
-  // Monitors page primary button
   if (monBtnStart) {
     monBtnStart.textContent = label;
     monBtnStart.classList.toggle('is-stop', active);
   }
-  // Settings primary button
   if (setBtnStart) {
     setBtnStart.textContent = label;
     setBtnStart.classList.toggle('is-stop', active);
   }
-  // Settings status text
   if (setCtrlTitle) {
     setCtrlTitle.textContent = active ? 'Monitoring active' : 'Not monitoring';
     setCtrlDesc.textContent  = active
-      ? `Pinging ${savedUrls.length} URL${savedUrls.length !== 1 ? 's' : ''} every ${fmtIntervalLabel(cfg.intervalMs)}.`
-      : 'Start to begin monitoring all saved URLs.';
+      ? `Pinging ${monitorsList.length} monitor${monitorsList.length !== 1 ? 's' : ''} every ${fmtIntervalLabel(cfg.intervalMs)}.`
+      : 'Start to begin monitoring all targets.';
   }
 }
 
-// ════════════════════════════════════════════════════════════
-// EVENT BINDINGS
-// ════════════════════════════════════════════════════════════
+btnAddUrl && btnAddUrl.addEventListener('click', addMonitor);
+urlInput  && urlInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addMonitor(); } });
 
-// Add URL
-btnAddUrl && btnAddUrl.addEventListener('click', addUrl);
-urlInput  && urlInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addUrl(); } });
-
-// All "Start/Stop Monitoring" buttons wired to the same toggle
 [ovBtnStart, monBtnStart, setBtnStart].forEach(btn => {
   btn && btn.addEventListener('click', () => {
     cfg.isMonitoring ? stopAllMonitoring() : startAllMonitoring();
   });
 });
 
-// "Check Now" buttons (monitors page + settings page)
 async function runCheckNow(btn) {
-  if (savedUrls.length === 0) { navigateTo('urls'); return; }
+  if (monitorsList.length === 0) { navigateTo('urls'); return; }
   const origText = btn.textContent;
   btn.textContent = 'Checking…';
   btn.disabled = true;
-  await Promise.all(savedUrls.map(url => performCheck(url, cfg.method)));
+  await Promise.all(monitorsList.map(m => performCheck(m)));
   btn.textContent = origText;
   btn.disabled = false;
 }
@@ -529,23 +555,13 @@ setBtnCheckNow && setBtnCheckNow.addEventListener('click', () => runCheckNow(set
 
 // Clear log
 btnClearLog && btnClearLog.addEventListener('click', async () => {
-  gStats.log            = [];
-  gStats.totalChecks    = 0;
-  gStats.successChecks  = 0;
+  gStats.log             = [];
+  gStats.totalChecks     = 0;
+  gStats.successChecks   = 0;
   gStats.totalResponseMs = 0;
-  // Reset per-monitor stats too
-  monitors.forEach((m, url) => {
-    m.totalChecks     = 0;
-    m.successChecks   = 0;
-    m.totalResponseMs = 0;
-    m.lastResult      = null;
-    refreshMonitorCard(url, m);
-  });
   try {
     await fetch(API_STATS, { method: 'DELETE' });
-  } catch (e) {
-    console.warn('Failed to clear stats on server', e);
-  }
+  } catch (e) {}
   renderLog();
   renderOverviewRecentLog();
   renderOverviewEndpoints();
@@ -564,12 +580,11 @@ function applyInterval(ms, save = true) {
     localStorage.setItem('backsaver_interval_ms', String(ms));
     persistSettings();
   }
-  // If active monitoring, update ongoing timers seamlessly
   if (cfg.isMonitoring) {
-    monitors.forEach((m, url) => {
+    monitors.forEach((m, id) => {
       clearTimeout(m.timerId);
       clearInterval(m.countdownId);
-      scheduleNext(url);
+      scheduleNext(monitorsList.find(item => item.id === id));
     });
     syncAllStartButtons();
   }
@@ -585,34 +600,22 @@ function applyMethod(method, save = true) {
     localStorage.setItem('backsaver_method', method);
     persistSettings();
   }
-  // Refresh monitor cards footers
-  monitors.forEach((m, url) => {
-    refreshMonitorCard(url, m);
-  });
 }
 
-// Interval buttons
 document.querySelectorAll('.interval-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    const ms = parseInt(btn.dataset.ms, 10);
-    applyInterval(ms, true);
-  });
+  btn.addEventListener('click', () => applyInterval(parseInt(btn.dataset.ms, 10), true));
 });
 
-// Method buttons
 document.querySelectorAll('.method-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    const method = btn.dataset.method;
-    applyMethod(method, true);
-  });
+  btn.addEventListener('click', () => applyMethod(btn.dataset.method, true));
 });
 
 // ════════════════════════════════════════════════════════════
-// MONITORING — START / STOP
+// MONITORING ENGINE & RUNTIME
 // ════════════════════════════════════════════════════════════
 
 function startAllMonitoring() {
-  if (savedUrls.length === 0) {
+  if (monitorsList.length === 0) {
     navigateTo('urls');
     shakeEl(urlInput);
     return;
@@ -622,28 +625,21 @@ function startAllMonitoring() {
   localStorage.setItem('backsaver_is_monitoring', 'true');
   persistSettings(true);
 
-  // Lock URL management inputs only (keep settings adjustable)
-  urlInput  && (urlInput.disabled = true);
-  btnAddUrl && (btnAddUrl.disabled = true);
+  renderMonitorList();
 
-  // Re-render URL list (hides remove buttons while monitoring)
-  renderUrlList();
-
-  // Clear & prepare monitor cards
   monitorGrid.innerHTML = '';
   monitorEmpty.style.display = 'none';
 
-  // Spin up one independent monitor per URL
-  savedUrls.forEach(async url => {
+  monitorsList.forEach(async monitor => {
     const m = {
       timerId: null, countdownId: null, countdownRemaining: 0,
       lastResult: null,
       totalChecks: 0, successChecks: 0, totalResponseMs: 0,
     };
-    monitors.set(url, m);
-    createMonitorCard(url);
-    await performCheck(url, cfg.method);
-    scheduleNext(url);
+    monitors.set(monitor.id, m);
+    createMonitorCard(monitor);
+    await performCheck(monitor);
+    scheduleNext(monitor);
   });
 
   syncAllStartButtons();
@@ -658,11 +654,7 @@ function stopAllMonitoring() {
   monitors.forEach(m => { clearTimeout(m.timerId); clearInterval(m.countdownId); });
   monitors.clear();
 
-  // Unlock inputs
-  urlInput  && (urlInput.disabled = false);
-  btnAddUrl && (btnAddUrl.disabled = false);
-
-  renderUrlList();
+  renderMonitorList();
 
   monitorGrid.innerHTML = '';
   monitorEmpty.style.display = 'flex';
@@ -672,12 +664,9 @@ function stopAllMonitoring() {
   renderOverviewEndpoints();
 }
 
-// ════════════════════════════════════════════════════════════
-// MONITORING — SCHEDULING
-// ════════════════════════════════════════════════════════════
-
-function scheduleNext(url) {
-  const m = monitors.get(url);
+function scheduleNext(monitor) {
+  if (!monitor) return;
+  const m = monitors.get(monitor.id);
   if (!m || !cfg.isMonitoring) return;
 
   m.countdownRemaining = cfg.intervalMs;
@@ -686,46 +675,50 @@ function scheduleNext(url) {
   m.countdownId = setInterval(() => {
     m.countdownRemaining = Math.max(0, m.countdownRemaining - 1000);
     if (m.countdownRemaining <= 0) clearInterval(m.countdownId);
-    refreshMonitorCard(url, m);
+    refreshMonitorCard(monitor, m);
   }, 1000);
 
-  refreshMonitorCard(url, m);
+  refreshMonitorCard(monitor, m);
 
   m.timerId = setTimeout(async () => {
-    if (!cfg.isMonitoring || !monitors.has(url)) return;
-    await performCheck(url, cfg.method);
-    scheduleNext(url);
+    if (!cfg.isMonitoring || !monitors.has(monitor.id)) return;
+    await performCheck(monitor);
+    scheduleNext(monitor);
   }, cfg.intervalMs);
 }
 
-// ════════════════════════════════════════════════════════════
-// MONITORING — HTTP CHECK
-// ════════════════════════════════════════════════════════════
-
-async function performCheck(url, method) {
-  const t0        = performance.now();
+async function performCheck(monitor) {
+  const t0 = performance.now();
   const timestamp = new Date();
-  const result    = { url, method, timestamp, code: null, status: 'UNKNOWN', responseMs: null, ok: false, error: null };
+  const result = {
+    monitorId: monitor.id,
+    name: monitor.name || monitor.url,
+    url: monitor.url,
+    type: monitor.type,
+    method: cfg.method,
+    timestamp,
+    code: null,
+    status: 'UNKNOWN',
+    responseMs: null,
+    ok: false,
+    error: null,
+    sslDaysRemaining: null,
+  };
 
   try {
-    const res = await fetch('/api/proxy', {
-      method: 'POST',
+    const res = await fetch(`${API_MONITORS}/${monitor.id}`, {
+      method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url, method })
+      body: JSON.stringify({ action: 'check_now' }),
     });
     const data = await res.json();
-    
-    result.responseMs = data.responseMs;
-    result.code   = data.code;
-    result.ok     = data.ok;
-    if (data.ok) {
-      result.status = 'UP';
-    } else if (data.aborted) {
-      result.status = 'TIMEOUT';
-      result.error = data.error;
-    } else {
-      result.status = 'DOWN';
-      result.error = data.error;
+    if (data.result) {
+      result.responseMs = data.result.responseMs;
+      result.code = data.result.statusCode;
+      result.ok = data.result.isUp;
+      result.status = data.result.status;
+      result.error = data.result.error;
+      result.sslDaysRemaining = data.result.sslDaysRemaining;
     }
   } catch (e) {
     result.responseMs = Math.round(performance.now() - t0);
@@ -733,25 +726,21 @@ async function performCheck(url, method) {
     result.error  = e.message;
   }
 
-  // ── Update global stats ──
   gStats.totalChecks++;
   if (result.ok) gStats.successChecks++;
   if (result.responseMs !== null) gStats.totalResponseMs += result.responseMs;
   gStats.log.unshift(result);
   if (gStats.log.length > 500) gStats.log.pop();
 
-  // ── Update per-monitor state ──
-  lastResults.set(url, result);
-  const m = monitors.get(url);
+  const m = monitors.get(monitor.id);
   if (m) {
     m.totalChecks++;
     if (result.ok) m.successChecks++;
     if (result.responseMs !== null) m.totalResponseMs += result.responseMs;
     m.lastResult = result;
-    refreshMonitorCard(url, m);
+    refreshMonitorCard(monitor, m);
   }
 
-  // ── Refresh all dependent UI ──
   renderLog();
   updateGlobalStatCards();
   renderOverviewEndpoints();
@@ -763,73 +752,72 @@ async function performCheck(url, method) {
 // MONITOR CARDS
 // ════════════════════════════════════════════════════════════
 
-function cardId(url) { return 'mc-' + url.replace(/[^a-zA-Z0-9]/g, '_'); }
+function cardId(id) { return 'mc-monitor-' + id; }
 
-function createMonitorCard(url) {
+function createMonitorCard(monitor) {
   const card = document.createElement('div');
   card.className = 'monitor-card';
-  card.id = cardId(url);
+  card.id = cardId(monitor.id);
   monitorGrid.appendChild(card);
-  refreshMonitorCard(url, monitors.get(url));
+  refreshMonitorCard(monitor, monitors.get(monitor.id));
 }
 
-function refreshMonitorCard(url, m) {
-  if (!url || !m) return;
-  const card = $(cardId(url));
+function refreshMonitorCard(monitor, m) {
+  if (!monitor || !m) return;
+  const card = $(cardId(monitor.id));
   if (!card) return;
 
-  const r        = m.lastResult;
-  const dotCls   = !r ? '' : r.ok ? 'ok' : (r.status === 'REACHABLE' ? 'warn' : 'error');
-  const borderCls= !r ? '' : r.ok ? 's-ok' : (r.status === 'REACHABLE' ? 's-warn' : 's-error');
-  const codeStr  = !r ? '—' : (r.code !== null ? String(r.code) : r.status);
-  const statusMsg= !r ? 'Waiting for first check…' : (r.error && !r.ok ? r.error : r.status);
-  const msStr    = !r || r.responseMs === null ? '—' : r.responseMs + ' ms';
-  const tsStr    = !r ? '—' : fmtTime(r.timestamp);
-  const cdLabel  = m.countdownRemaining > 0 ? 'next in ' + fmtCountdown(m.countdownRemaining) : (r ? '—' : 'checking…');
+  const r = m.lastResult;
+  const isUp = r ? r.ok : monitor.status === 'UP';
+  const dotCls = !r && monitor.status === 'PENDING' ? '' : isUp ? 'ok' : 'error';
+  const borderCls = isUp ? 's-ok' : (r ? 's-error' : '');
+  const codeStr = r ? (r.code !== null ? String(r.code) : r.status) : monitor.status;
+  const statusMsg = r ? (r.error && !r.ok ? r.error : r.status) : 'Ready';
+  const msStr = r && r.responseMs !== null ? r.responseMs + ' ms' : (monitor.last_response_ms ? monitor.last_response_ms + ' ms' : '—');
+  const cdLabel = m.countdownRemaining > 0 ? 'next in ' + fmtCountdown(m.countdownRemaining) : (r ? '—' : 'checking…');
 
-  const uptimePct = m.totalChecks > 0
-    ? Math.round((m.successChecks / m.totalChecks) * 100) + '%'
-    : '—';
-  const avgMs = (m.totalChecks > 0 && m.totalResponseMs > 0)
-    ? Math.round(m.totalResponseMs / m.totalChecks) + 'ms'
-    : '—';
+  const uptimePct = monitor.uptime_24h ? monitor.uptime_24h + '%' : (m.totalChecks > 0 ? Math.round((m.successChecks / m.totalChecks) * 100) + '%' : '100%');
+  const typeTag = (monitor.type || 'http').toUpperCase();
+  const sslNotice = monitor.ssl_days_remaining ? `<span style="font-size:11px;color:#22c55e">🔒 SSL: ${monitor.ssl_days_remaining}d left</span>` : '';
 
   card.className = 'monitor-card' + (borderCls ? ' ' + borderCls : '');
   card.innerHTML = `
     <div class="mc-top">
       <div class="mc-dot ${dotCls}"></div>
       <span class="mc-code">${escHtml(codeStr)}</span>
-      <span class="mc-ts">${tsStr}</span>
+      <span class="type-pill-badge">${typeTag}</span>
+      <span class="mc-ts">${r ? fmtTime(r.timestamp) : ''}</span>
     </div>
-    <div class="mc-url" title="${escHtml(url)}">${escHtml(url)}</div>
+    <div style="font-weight:600;font-size:15px;color:var(--color-deep-forest)">${escHtml(monitor.name || monitor.url)}</div>
+    <div class="mc-url" title="${escHtml(monitor.url)}">${escHtml(monitor.url)}</div>
     <div class="mc-msg">${escHtml(statusMsg)}</div>
     <div class="mc-stats">
       <div class="mc-stat">
-        <span class="mc-stat-lbl">Uptime</span>
+        <span class="mc-stat-lbl">Uptime 24h</span>
         <span class="mc-stat-val">${uptimePct}</span>
       </div>
       <div class="mc-stat">
-        <span class="mc-stat-lbl">Avg Response</span>
-        <span class="mc-stat-val">${avgMs}</span>
+        <span class="mc-stat-lbl">Latency</span>
+        <span class="mc-stat-val">${msStr}</span>
       </div>
       <div class="mc-stat">
         <span class="mc-stat-lbl">Checks</span>
         <span class="mc-stat-val">${m.totalChecks}</span>
       </div>
       <div class="mc-stat">
-        <span class="mc-stat-lbl">Last Response</span>
-        <span class="mc-stat-val">${msStr}</span>
+        <span class="mc-stat-lbl">Incidents (30d)</span>
+        <span class="mc-stat-val">${monitor.incident_count_30d || 0}</span>
       </div>
     </div>
     <div class="mc-footer">
-      <span class="mc-method">${escHtml(cfg.method)}</span>
+      <div>${sslNotice || `<span class="mc-method">${escHtml(monitor.type === 'port' ? 'PORT ' + monitor.port : cfg.method)}</span>`}</div>
       <span class="mc-countdown">${cdLabel}</span>
     </div>
   `;
 }
 
 // ════════════════════════════════════════════════════════════
-// RENDER: CHECK LOG
+// CHECK LOG
 // ════════════════════════════════════════════════════════════
 
 function renderLog() {
@@ -840,17 +828,18 @@ function renderLog() {
 
   logList.innerHTML = '';
   gStats.log.forEach(r => {
-    const dotCls  = r.ok ? 'ok' : (r.status === 'REACHABLE' ? 'warn' : 'error');
-    const codeStr = r.code !== null ? String(r.code) : r.status;
+    const isUp = r.ok || r.is_up;
+    const dotCls  = isUp ? 'ok' : 'error';
+    const codeStr = r.code || r.status_code || r.status || (isUp ? '200' : 'ERR');
     const msStr   = r.responseMs !== null ? r.responseMs + ' ms' : 'timeout';
 
     const row = document.createElement('div');
     row.className = 'log-row';
     row.innerHTML = `
       <div class="log-dot ${dotCls}"></div>
-      <span class="log-code">${escHtml(codeStr)}</span>
-      <span class="log-method">${escHtml(r.method)}</span>
-      <span class="log-url" title="${escHtml(r.url)}">${escHtml(r.url)}</span>
+      <span class="log-code">${escHtml(String(codeStr))}</span>
+      <span class="log-method">${escHtml(r.type ? r.type.toUpperCase() : 'HTTP')}</span>
+      <span class="log-url" title="${escHtml(r.url || r.name)}">${escHtml(r.name || r.url)}</span>
       <span class="log-ms">${msStr}</span>
       <span class="log-time">${fmtTime(r.timestamp)}</span>
     `;
@@ -861,11 +850,6 @@ function renderLog() {
 // ════════════════════════════════════════════════════════════
 // HELPERS
 // ════════════════════════════════════════════════════════════
-
-function isValidUrl(url) {
-  try { const u = new URL(url); return ['http:', 'https:'].includes(u.protocol); }
-  catch { return false; }
-}
 
 function fmtCountdown(ms) {
   if (ms <= 0) return '0s';
@@ -882,11 +866,13 @@ function fmtIntervalLabel(ms) {
 }
 
 function fmtTime(date) {
-  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  if (!date) return '';
+  const d = date instanceof Date ? date : new Date(date);
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
 function escHtml(s) {
-  return String(s)
+  return String(s || '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
@@ -896,23 +882,14 @@ function escHtml(s) {
 function shakeEl(el) {
   if (!el) return;
   el.style.animation = 'none';
-  el.offsetHeight; // reflow
+  el.offsetHeight;
   el.style.animation = 'shake .4s ease';
   setTimeout(() => { el.style.animation = ''; }, 450);
-}
-
-function flashBorder(el, color) {
-  if (!el) return;
-  const prev = el.style.outline;
-  el.style.outline = `2px solid ${color}`;
-  el.style.outlineOffset = '2px';
-  setTimeout(() => { el.style.outline = prev; el.style.outlineOffset = ''; }, 900);
 }
 
 // ════════════════════════════════════════════════════════════
 // INIT
 // ════════════════════════════════════════════════════════════
-
 
 (async function init() {
   try {
@@ -925,15 +902,11 @@ function flashBorder(el, color) {
   syncAllStartButtons();
   startServerRefresh();
 
-  // Auto-resume monitoring if it was active before refresh
-  if (localStorage.getItem('backsaver_is_monitoring') === 'true' && savedUrls.length > 0) {
-    setTimeout(startAllMonitoring, 500); // Slight delay for UI to settle
+  if (localStorage.getItem('backsaver_is_monitoring') === 'true' && monitorsList.length > 0) {
+    setTimeout(startAllMonitoring, 500);
   }
 
-
-  // ── Copyright year ──
   const currentYear = new Date().getFullYear();
   const sidebarYear = $('sidebar-year');
   if (sidebarYear) sidebarYear.textContent = currentYear;
 })();
-

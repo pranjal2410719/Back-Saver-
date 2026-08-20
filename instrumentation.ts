@@ -1,63 +1,72 @@
 export async function register() {
   if (process.env.NEXT_RUNTIME === 'nodejs') {
-    const { pool } = await import('./app/lib/db');
-    
-    // Start background worker for Node.js environments (like npm run dev)
-    const TIMEOUT_MS = 10000;
-    const LOG_LIMIT = 500;
+    const { pool, ensureTable } = await import('./app/lib/db');
+    const { executeMonitorCheck } = await import('./app/lib/checker');
 
-    async function probe(url: string) {
-      const t0 = Date.now();
-      const ctrl = new AbortController();
-      const timeout = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+    async function runWorkerCycle() {
       try {
-        const res = await fetch(url, { method: 'GET', signal: ctrl.signal });
-        clearTimeout(timeout);
-        return { code: res.status, ok: res.ok, responseMs: Date.now() - t0, aborted: false };
-      } catch (e: any) {
-        clearTimeout(timeout);
-        const isAbort = e.name === 'AbortError' || e.message?.includes('aborted');
-        return { code: null, ok: false, responseMs: Date.now() - t0, aborted: isAbort, error: isAbort ? 'Request timed out' : e.message };
-      }
-    }
+        await ensureTable();
 
-    async function runCron() {
-      try {
-        const stateRes = await pool.query("SELECT key, value FROM app_state WHERE key IN ('is_monitoring', 'urls', 'stats_log')");
-        let isMonitoring = false;
-        let urls: string[] = [];
-        let log: any[] = [];
-        
-        for (const row of stateRes.rows) {
-          if (row.key === 'is_monitoring') isMonitoring = row.value;
-          if (row.key === 'urls') urls = row.value;
-          if (row.key === 'stats_log') log = row.value;
+        // 1. Fetch active monitors due for a check
+        const dueMonitorsRes = await pool.query(`
+          SELECT * FROM monitors
+          WHERE status != 'PAUSED'
+            AND type != 'heartbeat'
+            AND (
+              last_checked_at IS NULL 
+              OR last_checked_at <= NOW() - (interval_seconds || ' seconds')::interval
+            )
+          LIMIT 50
+        `);
+
+        if (dueMonitorsRes.rows.length > 0) {
+          await Promise.allSettled(
+            dueMonitorsRes.rows.map(monitor => executeMonitorCheck(monitor))
+          );
         }
-        
-        if (!isMonitoring || urls.length === 0) return;
-        
-        const results = [];
-        for (const url of urls) {
-          const r = await probe(url);
-          results.push({
-            url, method: 'GET', timestamp: new Date().toISOString(),
-            code: r.code, status: r.ok ? 'UP' : r.aborted ? 'TIMEOUT' : 'DOWN',
-            responseMs: r.responseMs, ok: r.ok, error: r.error ?? null,
-          });
+
+        // 2. Evaluate Heartbeat monitors for missed pings
+        const lateHeartbeatsRes = await pool.query(`
+          SELECT h.*, m.name as monitor_name, m.status as monitor_status
+          FROM heartbeats h
+          JOIN monitors m ON m.id = h.monitor_id
+          WHERE m.status != 'PAUSED'
+            AND (
+              (h.last_ping_at IS NULL AND h.created_at <= NOW() - ((h.expected_interval_seconds + h.grace_seconds) || ' seconds')::interval)
+              OR (h.last_ping_at IS NOT NULL AND h.last_ping_at <= NOW() - ((h.expected_interval_seconds + h.grace_seconds) || ' seconds')::interval)
+            )
+        `);
+
+        for (const hb of lateHeartbeatsRes.rows) {
+          if (hb.monitor_status !== 'DOWN') {
+            await pool.query(
+              `UPDATE monitors SET status = 'DOWN', consecutive_fails = consecutive_fails + 1, last_checked_at = NOW() WHERE id = $1`,
+              [hb.monitor_id]
+            );
+            await pool.query(
+              `UPDATE heartbeats SET status = 'DOWN' WHERE id = $1`,
+              [hb.id]
+            );
+            await pool.query(
+              `INSERT INTO checks (monitor_id, status_code, response_ms, is_up, status, error)
+               VALUES ($1, NULL, NULL, false, 'HEARTBEAT_LATE', $2)`,
+              [hb.monitor_id, `Heartbeat missed expected ping window of ${hb.expected_interval_seconds}s`]
+            );
+            await pool.query(
+              `INSERT INTO incidents (monitor_id, started_at, cause)
+               VALUES ($1, NOW(), 'Heartbeat missed interval window')`,
+              [hb.monitor_id]
+            );
+          }
         }
-        
-        const newLog = [...results, ...log].slice(0, LOG_LIMIT);
-        await pool.query(
-          `INSERT INTO app_state (key, value) VALUES ('stats_log', $1) 
-           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
-          [JSON.stringify(newLog)]
-        );
       } catch (err) {
-        console.error("Background Worker Error:", err);
+        console.error('BackSaver Background Worker Cycle Error:', err);
       }
     }
 
-    // Run every 60 seconds
-    setInterval(runCron, 60000);
+    // Run scheduler check cycle every 10 seconds
+    setInterval(runWorkerCycle, 10000);
+    // Initial run immediately on boot
+    runWorkerCycle();
   }
 }
