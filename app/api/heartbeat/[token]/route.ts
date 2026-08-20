@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { pool, ensureTable } from '../../../../lib/db';
+import { pool, ensureTable } from '@/app/lib/db';
 
 export async function GET(request: Request, { params }: { params: Promise<{ token: string }> }) {
   return handleHeartbeat(await params);

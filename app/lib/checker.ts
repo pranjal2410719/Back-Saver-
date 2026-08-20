@@ -1,5 +1,3 @@
-import tls from 'tls';
-import net from 'net';
 import { pool } from './db';
 
 export interface CheckResult {
@@ -132,6 +130,7 @@ export async function checkKeyword(
  */
 export async function checkSsl(urlStr: string, timeoutMs = 10000): Promise<CheckResult> {
   const t0 = Date.now();
+  const tls = await import('tls');
   return new Promise((resolve) => {
     let hostname = urlStr;
     try {
@@ -208,6 +207,7 @@ export async function checkSsl(urlStr: string, timeoutMs = 10000): Promise<Check
  */
 export async function checkPort(hostOrUrl: string, port = 80, timeoutMs = 10000): Promise<CheckResult> {
   const t0 = Date.now();
+  const net = await import('net');
   let host = hostOrUrl;
   try {
     if (hostOrUrl.startsWith('http')) {
