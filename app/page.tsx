@@ -64,6 +64,14 @@ export default function Home() {
         </svg>
         Settings
       </button>
+
+      <a class="nav-item" href="/status" target="_blank" style="text-decoration:none">
+        <svg class="nav-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.4"/>
+          <path d="M5.5 8l2 2 3.5-4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        Status Page ↗
+      </a>
     </nav>
 
     <div class="sidebar-footer">

@@ -315,7 +315,7 @@ export async function executeMonitorCheck(monitor: MonitorRecord): Promise<Check
       ]
     );
 
-    // ── Incident Management Engine ──
+    // ── Incident Management & Alert Dispatching Engine ──
     if (!result.isUp && prevStatus !== 'DOWN' && consecutiveFails >= 1) {
       // Open new incident
       await pool.query(
@@ -323,8 +323,12 @@ export async function executeMonitorCheck(monitor: MonitorRecord): Promise<Check
          VALUES ($1, NOW(), $2)`,
         [monitor.id, result.error || result.status]
       );
+      // Trigger instant alert notifications (Discord, Slack, Webhook, Email)
+      const { sendStateChangeAlert } = await import('./alerts');
+      sendStateChangeAlert(monitor.name, monitor.url, prevStatus, 'DOWN', result.error || result.status);
     } else if (result.isUp && prevStatus === 'DOWN') {
       // Resolve ongoing incident
+      let durationSec = null;
       const openIncident = await pool.query(
         `SELECT id, started_at FROM incidents 
          WHERE monitor_id = $1 AND resolved_at IS NULL 
@@ -333,7 +337,7 @@ export async function executeMonitorCheck(monitor: MonitorRecord): Promise<Check
       );
       if (openIncident.rows.length > 0) {
         const inc = openIncident.rows[0];
-        const durationSec = Math.round((Date.now() - new Date(inc.started_at).getTime()) / 1000);
+        durationSec = Math.round((Date.now() - new Date(inc.started_at).getTime()) / 1000);
         await pool.query(
           `UPDATE incidents 
            SET resolved_at = NOW(), duration_seconds = $1 
@@ -341,6 +345,9 @@ export async function executeMonitorCheck(monitor: MonitorRecord): Promise<Check
           [durationSec, inc.id]
         );
       }
+      // Trigger recovery alert
+      const { sendStateChangeAlert } = await import('./alerts');
+      sendStateChangeAlert(monitor.name, monitor.url, 'DOWN', 'UP', null, durationSec);
     }
   } catch (dbErr) {
     console.error('Error logging check execution:', dbErr);
