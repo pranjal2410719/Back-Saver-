@@ -30,6 +30,11 @@ export async function GET() {
           FROM incidents 
           WHERE monitor_id = m.id AND started_at >= NOW() - INTERVAL '30 days'
         ) as incident_count_30d,
+        (
+          SELECT COUNT(*)
+          FROM checks
+          WHERE monitor_id = m.id
+        ) as checks_total,
         h.token as heartbeat_token,
         h.last_ping_at as heartbeat_last_ping
       FROM monitors m
@@ -52,8 +57,19 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  let body: any;
   try {
-    const body = await request.json();
+    body = await request.json();
+  } catch {
+    body = {};
+  }
+
+  // Server-side "Check Now" for all monitors
+  if (body?.action === 'check_all') {
+    return handleCheckAll();
+  }
+
+  try {
     const {
       name,
       type = 'http',
@@ -118,5 +134,34 @@ export async function POST(request: Request) {
   } catch (err: any) {
     console.error('Monitors POST Error:', err);
     return NextResponse.json({ error: err.message }, { status: 500 });
+  }
+}
+
+async function handleCheckAll() {
+  try {
+    await ensureTable();
+    const monitorsRes = await pool.query(
+      `SELECT * FROM monitors
+       WHERE status != 'PAUSED' AND type != 'heartbeat'`
+    );
+
+    const monitors: MonitorRecord[] = monitorsRes.rows;
+    const results = await Promise.allSettled(
+      monitors.map(m => executeMonitorCheck(m).then(r => ({
+        id: m.id,
+        name: m.name || m.url,
+        url: m.url,
+        status: r.status,
+        isUp: r.isUp,
+        responseMs: r.responseMs,
+        error: r.error,
+      })))
+    );
+
+    const summary = results.map(r => (r.status === 'fulfilled' ? r.value : { error: String(r.reason) }));
+    return NextResponse.json({ success: true, checked: summary.length, results: summary });
+  } catch (err: any) {
+    console.error('Monitors check_all Error:', err);
+    return NextResponse.json({ error: err.message, success: false }, { status: 500 });
   }
 }

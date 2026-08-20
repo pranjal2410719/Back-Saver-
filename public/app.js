@@ -22,19 +22,15 @@ const cfg = {
   isMonitoring:  false,
 };
 
-/** Aggregate stats across all monitors */
+/**
+ * Aggregate stats across all endpoints, sourced from the server check log
+ */
 const gStats = {
   totalChecks:    0,
   successChecks:  0,
   totalResponseMs: 0,
   log:            [],  // newest first
 };
-
-/**
- * Per-monitor runtime state
- * Map<monitorId, { timerId, countdownId, countdownRemaining, lastResult }>
- */
-const monitors = new Map();
 
 // ════════════════════════════════════════════════════════════
 // DOM REFERENCES
@@ -161,12 +157,6 @@ const API_SETTINGS = '/api/settings';
 
 async function loadServerState() {
   try {
-    const localInterval = localStorage.getItem('backsaver_interval_ms');
-    if (localInterval) applyInterval(parseInt(localInterval, 10), false);
-    
-    const localMethod = localStorage.getItem('backsaver_method');
-    if (localMethod) applyMethod(localMethod, false);
-
     // Fetch monitors
     const resMonitors = await fetch(API_MONITORS);
     if (resMonitors.ok) {
@@ -176,19 +166,19 @@ async function loadServerState() {
       }
     }
 
-    // Fetch settings
+    // Fetch settings (server is the source of truth)
     const resSettings = await fetch(API_SETTINGS);
     if (resSettings.ok) {
       const { isMonitoring, intervalMs, method } = await resSettings.json();
-      if (typeof intervalMs === 'number' && !localInterval) applyInterval(intervalMs, false);
-      if (method && !localMethod) applyMethod(method, false);
+      if (typeof intervalMs === 'number') applyInterval(intervalMs, false);
+      if (method) applyMethod(method, false);
       if (isMonitoring) {
         cfg.isMonitoring = true;
         syncAllStartButtons();
       }
     }
 
-    // Fetch stats log
+    // Fetch stats log (server-side check history)
     const resStats = await fetch(API_STATS);
     if (resStats.ok) {
       const data = await resStats.json();
@@ -241,23 +231,37 @@ function recomputeStats() {
   renderAll();
 }
 
-function startServerRefresh() {
-  setInterval(async () => {
-    try {
-      const res = await fetch(API_MONITORS);
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data.monitors)) {
-          monitorsList = data.monitors;
-          renderAll();
-        }
+async function refreshFromServer() {
+  try {
+    const [resMonitors, resStats] = await Promise.all([
+      fetch(API_MONITORS),
+      fetch(API_STATS),
+    ]);
+
+    if (resMonitors.ok) {
+      const data = await resMonitors.json();
+      if (Array.isArray(data.monitors)) monitorsList = data.monitors;
+    }
+    if (resStats.ok) {
+      const data = await resStats.json();
+      if (Array.isArray(data.log)) {
+        gStats.log = data.log.map(r => ({ ...r, timestamp: new Date(r.timestamp || r.created_at) }));
+        recomputeStats();
       }
-    } catch (e) {}
-  }, 10000);
+    }
+    renderAll();
+  } catch (e) {
+    console.warn('Failed to refresh server state', e);
+  }
+}
+
+function startServerRefresh() {
+  setInterval(refreshFromServer, 10000);
 }
 
 function renderAll() {
   renderMonitorList();
+  renderMonitorCards();
   renderOverviewEndpoints();
   renderOverviewRecentLog();
   updateGlobalStatCards();
@@ -334,8 +338,8 @@ async function addMonitor() {
       if (nameInput) nameInput.value = '';
       if (keywordInput) keywordInput.value = '';
       if (portInput) portInput.value = '';
-      
-      renderAll();
+
+      await refreshFromServer();
       navigateTo('monitors');
     } else {
       alert(data.error || 'Failed to create monitor');
@@ -359,7 +363,6 @@ async function removeMonitor(id) {
     const res = await fetch(`${API_MONITORS}/${id}`, { method: 'DELETE' });
     if (res.ok) {
       monitorsList = monitorsList.filter(m => m.id !== id);
-      monitors.delete(id);
       renderAll();
     }
   } catch (e) {
@@ -478,9 +481,16 @@ function updateGlobalStatCards() {
   ovTotal.textContent    = gStats.totalChecks;
   ovUrlCount.textContent = monitorsList.length;
 
-  ovUptime.textContent = gStats.totalChecks > 0
-    ? Math.round((gStats.successChecks / gStats.totalChecks) * 100) + '%'
-    : (monitorsList.length > 0 ? '99.9%' : '—');
+  // Overall uptime from server-side 24h aggregates when available
+  const uptimes = monitorsList.map(m => parseFloat(m.uptime_24h)).filter(v => !isNaN(v));
+  if (uptimes.length > 0) {
+    const avg = uptimes.reduce((s, v) => s + v, 0) / uptimes.length;
+    ovUptime.textContent = avg.toFixed(1) + '%';
+  } else {
+    ovUptime.textContent = gStats.totalChecks > 0
+      ? Math.round((gStats.successChecks / gStats.totalChecks) * 100) + '%'
+      : (monitorsList.length > 0 ? '99.9%' : '—');
+  }
 
   ovAvg.textContent = (gStats.totalChecks > 0 && gStats.totalResponseMs > 0)
     ? Math.round(gStats.totalResponseMs / gStats.totalChecks) + 'ms'
@@ -546,27 +556,32 @@ async function runCheckNow(btn) {
   const origText = btn.textContent;
   btn.textContent = 'Checking…';
   btn.disabled = true;
-  await Promise.all(monitorsList.map(m => performCheck(m)));
+  try {
+    const res = await fetch(API_MONITORS, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'check_all' }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      console.warn('Check Now failed:', data && data.error);
+    }
+    await refreshFromServer();
+  } catch (e) {
+    console.warn('Check Now failed:', e);
+  }
   btn.textContent = origText;
   btn.disabled = false;
 }
 monBtnCheckNow && monBtnCheckNow.addEventListener('click', () => runCheckNow(monBtnCheckNow));
 setBtnCheckNow && setBtnCheckNow.addEventListener('click', () => runCheckNow(setBtnCheckNow));
 
-// Clear log
+// Clear log (server-side)
 btnClearLog && btnClearLog.addEventListener('click', async () => {
-  gStats.log             = [];
-  gStats.totalChecks     = 0;
-  gStats.successChecks   = 0;
-  gStats.totalResponseMs = 0;
   try {
     await fetch(API_STATS, { method: 'DELETE' });
   } catch (e) {}
-  renderLog();
-  renderOverviewRecentLog();
-  renderOverviewEndpoints();
-  updateGlobalStatCards();
-  updateSidebarBadges();
+  await refreshFromServer();
 });
 
 function applyInterval(ms, save = true) {
@@ -577,15 +592,7 @@ function applyInterval(ms, save = true) {
     btn.classList.toggle('is-selected', btnMs === ms);
   });
   if (save) {
-    localStorage.setItem('backsaver_interval_ms', String(ms));
     persistSettings();
-  }
-  if (cfg.isMonitoring) {
-    monitors.forEach((m, id) => {
-      clearTimeout(m.timerId);
-      clearInterval(m.countdownId);
-      scheduleNext(monitorsList.find(item => item.id === id));
-    });
     syncAllStartButtons();
   }
 }
@@ -596,10 +603,7 @@ function applyMethod(method, save = true) {
   document.querySelectorAll('.method-btn').forEach(btn => {
     btn.classList.toggle('is-selected', btn.dataset.method === method);
   });
-  if (save) {
-    localStorage.setItem('backsaver_method', method);
-    persistSettings();
-  }
+  if (save) persistSettings();
 }
 
 document.querySelectorAll('.interval-btn').forEach(btn => {
@@ -611,10 +615,10 @@ document.querySelectorAll('.method-btn').forEach(btn => {
 });
 
 // ════════════════════════════════════════════════════════════
-// MONITORING ENGINE & RUNTIME
+// MONITORING CONTROL (server-side: toggle + scheduled function)
 // ════════════════════════════════════════════════════════════
 
-function startAllMonitoring() {
+async function startAllMonitoring() {
   if (monitorsList.length === 0) {
     navigateTo('urls');
     shakeEl(urlInput);
@@ -622,134 +626,22 @@ function startAllMonitoring() {
   }
 
   cfg.isMonitoring = true;
-  localStorage.setItem('backsaver_is_monitoring', 'true');
-  persistSettings(true);
-
-  renderMonitorList();
-
-  monitorGrid.innerHTML = '';
-  monitorEmpty.style.display = 'none';
-
-  monitorsList.forEach(async monitor => {
-    const m = {
-      timerId: null, countdownId: null, countdownRemaining: 0,
-      lastResult: null,
-      totalChecks: 0, successChecks: 0, totalResponseMs: 0,
-    };
-    monitors.set(monitor.id, m);
-    createMonitorCard(monitor);
-    await performCheck(monitor);
-    scheduleNext(monitor);
-  });
-
+  await persistSettings(true);
+  await refreshFromServer();
   syncAllStartButtons();
   updateSidebarBadges();
 }
 
-function stopAllMonitoring() {
+async function stopAllMonitoring() {
   cfg.isMonitoring = false;
-  localStorage.setItem('backsaver_is_monitoring', 'false');
-  persistSettings(false);
-
-  monitors.forEach(m => { clearTimeout(m.timerId); clearInterval(m.countdownId); });
-  monitors.clear();
-
-  renderMonitorList();
-
-  monitorGrid.innerHTML = '';
-  monitorEmpty.style.display = 'flex';
-
+  await persistSettings(false);
   syncAllStartButtons();
   updateSidebarBadges();
-  renderOverviewEndpoints();
-}
-
-function scheduleNext(monitor) {
-  if (!monitor) return;
-  const m = monitors.get(monitor.id);
-  if (!m || !cfg.isMonitoring) return;
-
-  m.countdownRemaining = cfg.intervalMs;
-
-  clearInterval(m.countdownId);
-  m.countdownId = setInterval(() => {
-    m.countdownRemaining = Math.max(0, m.countdownRemaining - 1000);
-    if (m.countdownRemaining <= 0) clearInterval(m.countdownId);
-    refreshMonitorCard(monitor, m);
-  }, 1000);
-
-  refreshMonitorCard(monitor, m);
-
-  m.timerId = setTimeout(async () => {
-    if (!cfg.isMonitoring || !monitors.has(monitor.id)) return;
-    await performCheck(monitor);
-    scheduleNext(monitor);
-  }, cfg.intervalMs);
-}
-
-async function performCheck(monitor) {
-  const t0 = performance.now();
-  const timestamp = new Date();
-  const result = {
-    monitorId: monitor.id,
-    name: monitor.name || monitor.url,
-    url: monitor.url,
-    type: monitor.type,
-    method: cfg.method,
-    timestamp,
-    code: null,
-    status: 'UNKNOWN',
-    responseMs: null,
-    ok: false,
-    error: null,
-    sslDaysRemaining: null,
-  };
-
-  try {
-    const res = await fetch(`${API_MONITORS}/${monitor.id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'check_now' }),
-    });
-    const data = await res.json();
-    if (data.result) {
-      result.responseMs = data.result.responseMs;
-      result.code = data.result.statusCode;
-      result.ok = data.result.isUp;
-      result.status = data.result.status;
-      result.error = data.result.error;
-      result.sslDaysRemaining = data.result.sslDaysRemaining;
-    }
-  } catch (e) {
-    result.responseMs = Math.round(performance.now() - t0);
-    result.status = 'ERROR';
-    result.error  = e.message;
-  }
-
-  gStats.totalChecks++;
-  if (result.ok) gStats.successChecks++;
-  if (result.responseMs !== null) gStats.totalResponseMs += result.responseMs;
-  gStats.log.unshift(result);
-  if (gStats.log.length > 500) gStats.log.pop();
-
-  const m = monitors.get(monitor.id);
-  if (m) {
-    m.totalChecks++;
-    if (result.ok) m.successChecks++;
-    if (result.responseMs !== null) m.totalResponseMs += result.responseMs;
-    m.lastResult = result;
-    refreshMonitorCard(monitor, m);
-  }
-
-  renderLog();
-  updateGlobalStatCards();
-  renderOverviewEndpoints();
-  renderOverviewRecentLog();
-  updateSidebarBadges();
+  renderMonitorCards();
 }
 
 // ════════════════════════════════════════════════════════════
-// MONITOR CARDS
+// MONITOR CARDS (rendered from server state only)
 // ════════════════════════════════════════════════════════════
 
 function cardId(id) { return 'mc-monitor-' + id; }
@@ -759,24 +651,46 @@ function createMonitorCard(monitor) {
   card.className = 'monitor-card';
   card.id = cardId(monitor.id);
   monitorGrid.appendChild(card);
-  refreshMonitorCard(monitor, monitors.get(monitor.id));
+  refreshMonitorCard(monitor);
 }
 
-function refreshMonitorCard(monitor, m) {
-  if (!monitor || !m) return;
+function renderMonitorCards() {
+  if (!monitorGrid) return;
+  if (monitorsList.length === 0) {
+    monitorGrid.innerHTML = '';
+    monitorEmpty.style.display = 'flex';
+    return;
+  }
+  monitorEmpty.style.display = 'none';
+  monitorGrid.innerHTML = '';
+  monitorsList.forEach(m => createMonitorCard(m));
+}
+
+function nextInLabel(monitor) {
+  if (!cfg.isMonitoring || !monitor.last_checked_at) return '—';
+  const interval = parseInt(monitor.interval_seconds, 10) || 60;
+  const next = new Date(monitor.last_checked_at).getTime() + interval * 1000;
+  const remaining = next - Date.now();
+  if (remaining <= 0) return 'due now';
+  return 'next in ' + fmtCountdown(remaining);
+}
+
+function refreshMonitorCard(monitor) {
   const card = $(cardId(monitor.id));
   if (!card) return;
 
-  const r = m.lastResult;
-  const isUp = r ? r.ok : monitor.status === 'UP';
-  const dotCls = !r && monitor.status === 'PENDING' ? '' : isUp ? 'ok' : 'error';
-  const borderCls = isUp ? 's-ok' : (r ? 's-error' : '');
-  const codeStr = r ? (r.code !== null ? String(r.code) : r.status) : monitor.status;
-  const statusMsg = r ? (r.error && !r.ok ? r.error : r.status) : 'Ready';
-  const msStr = r && r.responseMs !== null ? r.responseMs + ' ms' : (monitor.last_response_ms ? monitor.last_response_ms + ' ms' : '—');
-  const cdLabel = m.countdownRemaining > 0 ? 'next in ' + fmtCountdown(m.countdownRemaining) : (r ? '—' : 'checking…');
+  const isUp = monitor.status === 'UP';
+  const idle = monitor.status === 'PENDING' || monitor.status === 'PAUSED';
+  const dotCls = idle ? '' : isUp ? 'ok' : 'error';
+  const borderCls = isUp ? 's-ok' : (idle ? '' : 's-error');
+  const statusCode = parseInt(monitor.last_status_code, 10);
+  const codeStr = statusCode > 0 ? String(statusCode) : monitor.status;
+  const statusMsg = monitor.last_error || monitor.status;
+  const msStr = monitor.last_response_ms ? monitor.last_response_ms + ' ms' : '—';
+  const cdLabel = nextInLabel(monitor);
 
-  const uptimePct = monitor.uptime_24h ? monitor.uptime_24h + '%' : (m.totalChecks > 0 ? Math.round((m.successChecks / m.totalChecks) * 100) + '%' : '100%');
+  const uptimePct = monitor.uptime_24h ? monitor.uptime_24h + '%' : '100%';
+  const checksTotal = parseInt(monitor.checks_total, 10) || 0;
   const typeTag = (monitor.type || 'http').toUpperCase();
   const sslNotice = monitor.ssl_days_remaining ? `<span style="font-size:11px;color:#22c55e">🔒 SSL: ${monitor.ssl_days_remaining}d left</span>` : '';
 
@@ -786,7 +700,7 @@ function refreshMonitorCard(monitor, m) {
       <div class="mc-dot ${dotCls}"></div>
       <span class="mc-code">${escHtml(codeStr)}</span>
       <span class="type-pill-badge">${typeTag}</span>
-      <span class="mc-ts">${r ? fmtTime(r.timestamp) : ''}</span>
+      <span class="mc-ts">${monitor.last_check_time ? fmtTime(monitor.last_check_time) : ''}</span>
     </div>
     <div style="font-weight:600;font-size:15px;color:var(--color-deep-forest)">${escHtml(monitor.name || monitor.url)}</div>
     <div class="mc-url" title="${escHtml(monitor.url)}">${escHtml(monitor.url)}</div>
@@ -802,7 +716,7 @@ function refreshMonitorCard(monitor, m) {
       </div>
       <div class="mc-stat">
         <span class="mc-stat-lbl">Checks</span>
-        <span class="mc-stat-val">${m.totalChecks}</span>
+        <span class="mc-stat-val">${checksTotal}</span>
       </div>
       <div class="mc-stat">
         <span class="mc-stat-lbl">Incidents (30d)</span>
@@ -902,9 +816,16 @@ function shakeEl(el) {
   syncAllStartButtons();
   startServerRefresh();
 
-  if (localStorage.getItem('backsaver_is_monitoring') === 'true' && monitorsList.length > 0) {
-    setTimeout(startAllMonitoring, 500);
-  }
+  // Live "next check in" countdown ticks (server-driven schedule)
+  setInterval(() => {
+    if (!cfg.isMonitoring) return;
+    monitorsList.forEach(m => {
+      const card = $(cardId(m.id));
+      if (!card) return;
+      const el = card.querySelector('.mc-countdown');
+      if (el) el.textContent = nextInLabel(m);
+    });
+  }, 1000);
 
   const currentYear = new Date().getFullYear();
   const sidebarYear = $('sidebar-year');

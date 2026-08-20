@@ -54,6 +54,11 @@ export async function POST(request: Request) {
       [JSON.stringify(settingsObj)]
     );
 
+    // Re-schedule all monitors at the new global interval (server-side scheduling)
+    if (typeof intervalMs === 'number' && intervalMs > 0) {
+      await pool.query('UPDATE monitors SET interval_seconds = $1', [Math.round(intervalMs / 1000)]);
+    }
+
     return NextResponse.json({ success: true, settings: settingsObj });
   } catch (err: any) {
     console.error('Settings POST Error:', err);

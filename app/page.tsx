@@ -408,7 +408,7 @@ export default function Home() {
             </svg>
             <div>
               <p class="notice-title">Monitoring Runs on Netlify's Servers</p>
-              <p class="notice-text">Saved URLs are stored in Netlify Blobs and checked automatically by a scheduled function (<code>&#42;/1 * * * *</code>) — continuously, even when you're not online. Browser checks below are a live preview and may hit CORS limits (missing <code>Access-Control-Allow-Origin</code> headers).</p>
+              <p class="notice-text">All monitoring runs on Netlify's servers. A scheduled function (<code>&#42;/1 * * * *</code>) pings every monitor 24/7 and records results in the database — even when your browser is closed. This dashboard is a live view of that server-side state.</p>
             </div>
           </div>
 

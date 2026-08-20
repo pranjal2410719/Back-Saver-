@@ -11,6 +11,17 @@ export default async function handler() {
   try {
     await ensureTable();
 
+    // Honor the server-side monitoring toggle (set via POST /api/settings)
+    const settingsRes = await pool.query("SELECT value FROM app_state WHERE key = 'is_monitoring'");
+    const isMonitoring = settingsRes.rows.length > 0 ? settingsRes.rows[0].value === true : false;
+    if (!isMonitoring) {
+      console.log('[Netlify Scheduled Function] Monitoring is disabled — skipping check sweep.');
+      return new Response(JSON.stringify({ success: true, skipped: true, reason: 'monitoring_disabled' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
     // 1. Fetch active monitors due for checking
     const dueMonitorsRes = await pool.query(`
       SELECT * FROM monitors
