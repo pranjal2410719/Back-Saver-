@@ -37,10 +37,10 @@ export async function DELETE(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
     const id = searchParams.get('id');
-    if (!id) return NextResponse.json({ error: 'ID is required' }, { status: 400 });
+    if (!id || !/^\d+$/.test(id)) return NextResponse.json({ error: 'ID is required' }, { status: 400 });
 
     await ensureAlertsTable();
-    await pool.query('DELETE FROM alert_channels WHERE id = $1', [parseInt(id, 10)]);
+    await pool.query('DELETE FROM alert_channels WHERE id = $1', [id]);
 
     return NextResponse.json({ success: true });
   } catch (err: any) {

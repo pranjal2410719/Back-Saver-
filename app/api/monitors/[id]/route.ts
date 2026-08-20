@@ -5,8 +5,8 @@ import { executeMonitorCheck, MonitorRecord } from '../../../lib/checker';
 export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    const monitorId = parseInt(id, 10);
-    if (!monitorId) return NextResponse.json({ error: 'Invalid ID' }, { status: 400 });
+    if (!/^\d+$/.test(id)) return NextResponse.json({ error: 'Invalid ID' }, { status: 400 });
+    const monitorId: string = id;
 
     await ensureTable();
 
@@ -54,8 +54,8 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
 export async function DELETE(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    const monitorId = parseInt(id, 10);
-    if (!monitorId) return NextResponse.json({ error: 'Invalid ID' }, { status: 400 });
+    if (!/^\d+$/.test(id)) return NextResponse.json({ error: 'Invalid ID' }, { status: 400 });
+    const monitorId: string = id;
 
     await ensureTable();
     await pool.query('DELETE FROM monitors WHERE id = $1', [monitorId]);
@@ -69,8 +69,8 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    const monitorId = parseInt(id, 10);
-    if (!monitorId) return NextResponse.json({ error: 'Invalid ID' }, { status: 400 });
+    if (!/^\d+$/.test(id)) return NextResponse.json({ error: 'Invalid ID' }, { status: 400 });
+    const monitorId: string = id;
 
     const body = await request.json();
     await ensureTable();
