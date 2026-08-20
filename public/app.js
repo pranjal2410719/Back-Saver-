@@ -159,6 +159,16 @@ const API_SETTINGS = '/api/settings';
 
 async function loadServerState() {
   try {
+    // Check localStorage first for instant local preferences
+    const localInterval = localStorage.getItem('backsaver_interval_ms');
+    if (localInterval) {
+      applyInterval(parseInt(localInterval, 10), false);
+    }
+    const localMethod = localStorage.getItem('backsaver_method');
+    if (localMethod) {
+      applyMethod(localMethod, false);
+    }
+
     const resUrls = await fetch(API_URLS);
     if (resUrls.ok) {
       const data = await resUrls.json();
@@ -166,7 +176,13 @@ async function loadServerState() {
     }
     const resSettings = await fetch(API_SETTINGS);
     if (resSettings.ok) {
-      const { isMonitoring } = await resSettings.json();
+      const { isMonitoring, intervalMs, method } = await resSettings.json();
+      if (typeof intervalMs === 'number' && !localInterval) {
+        applyInterval(intervalMs, false);
+      }
+      if (method && !localMethod) {
+        applyMethod(method, false);
+      }
       if (isMonitoring) {
         cfg.isMonitoring = true;
         syncAllStartButtons();
@@ -199,7 +215,11 @@ async function persistSettings(isMonitoring) {
     await fetch(API_SETTINGS, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ isMonitoring }),
+      body: JSON.stringify({
+        isMonitoring: isMonitoring ?? cfg.isMonitoring,
+        intervalMs: cfg.intervalMs,
+        method: cfg.method,
+      }),
     });
   } catch (e) {
     console.warn('Failed to persist settings to server', e);
@@ -533,23 +553,57 @@ btnClearLog && btnClearLog.addEventListener('click', async () => {
   updateSidebarBadges();
 });
 
+function applyInterval(ms, save = true) {
+  if (!ms || isNaN(ms)) return;
+  cfg.intervalMs = ms;
+  document.querySelectorAll('.interval-btn').forEach(btn => {
+    const btnMs = parseInt(btn.dataset.ms, 10);
+    btn.classList.toggle('is-selected', btnMs === ms);
+  });
+  if (save) {
+    localStorage.setItem('backsaver_interval_ms', String(ms));
+    persistSettings();
+  }
+  // If active monitoring, update ongoing timers seamlessly
+  if (cfg.isMonitoring) {
+    monitors.forEach((m, url) => {
+      clearTimeout(m.timerId);
+      clearInterval(m.countdownId);
+      scheduleNext(url);
+    });
+    syncAllStartButtons();
+  }
+}
+
+function applyMethod(method, save = true) {
+  if (!method) return;
+  cfg.method = method;
+  document.querySelectorAll('.method-btn').forEach(btn => {
+    btn.classList.toggle('is-selected', btn.dataset.method === method);
+  });
+  if (save) {
+    localStorage.setItem('backsaver_method', method);
+    persistSettings();
+  }
+  // Refresh monitor cards footers
+  monitors.forEach((m, url) => {
+    refreshMonitorCard(url, m);
+  });
+}
+
 // Interval buttons
 document.querySelectorAll('.interval-btn').forEach(btn => {
   btn.addEventListener('click', () => {
-    if (cfg.isMonitoring) return;
-    document.querySelectorAll('.interval-btn').forEach(b => b.classList.remove('is-selected'));
-    btn.classList.add('is-selected');
-    cfg.intervalMs = parseInt(btn.dataset.ms, 10);
+    const ms = parseInt(btn.dataset.ms, 10);
+    applyInterval(ms, true);
   });
 });
 
 // Method buttons
 document.querySelectorAll('.method-btn').forEach(btn => {
   btn.addEventListener('click', () => {
-    if (cfg.isMonitoring) return;
-    document.querySelectorAll('.method-btn').forEach(b => b.classList.remove('is-selected'));
-    btn.classList.add('is-selected');
-    cfg.method = btn.dataset.method;
+    const method = btn.dataset.method;
+    applyMethod(method, true);
   });
 });
 
@@ -568,11 +622,9 @@ function startAllMonitoring() {
   localStorage.setItem('backsaver_is_monitoring', 'true');
   persistSettings(true);
 
-  // Lock inputs
+  // Lock URL management inputs only (keep settings adjustable)
   urlInput  && (urlInput.disabled = true);
   btnAddUrl && (btnAddUrl.disabled = true);
-  document.querySelectorAll('.interval-btn').forEach(b => b.disabled = true);
-  document.querySelectorAll('.method-btn').forEach(b => b.disabled = true);
 
   // Re-render URL list (hides remove buttons while monitoring)
   renderUrlList();
@@ -609,8 +661,6 @@ function stopAllMonitoring() {
   // Unlock inputs
   urlInput  && (urlInput.disabled = false);
   btnAddUrl && (btnAddUrl.disabled = false);
-  document.querySelectorAll('.interval-btn').forEach(b => b.disabled = false);
-  document.querySelectorAll('.method-btn').forEach(b => b.disabled = false);
 
   renderUrlList();
 
