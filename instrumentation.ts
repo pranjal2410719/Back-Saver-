@@ -1,9 +1,8 @@
 export async function register() {
   if (process.env.NEXT_RUNTIME === 'nodejs') {
-    const { Pool } = await import('pg');
+    const { pool } = await import('./app/lib/db');
     
     // Start background worker for Node.js environments (like npm run dev)
-    const pool = new Pool({ connectionString: process.env.DATABASE_URL });
     const TIMEOUT_MS = 10000;
     const LOG_LIMIT = 500;
 

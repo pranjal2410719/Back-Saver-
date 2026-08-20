@@ -169,7 +169,6 @@ async function loadServerState() {
       const { isMonitoring } = await resSettings.json();
       if (isMonitoring) {
         cfg.isMonitoring = true;
-  persistSettings(true);
         syncAllStartButtons();
       }
     }
@@ -202,7 +201,9 @@ async function persistSettings(isMonitoring) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ isMonitoring }),
     });
-  } catch (e) {}
+  } catch (e) {
+    console.warn('Failed to persist settings to server', e);
+  }
 }
 
 function mergeServerLog(serverLog) {
@@ -507,7 +508,7 @@ monBtnCheckNow && monBtnCheckNow.addEventListener('click', () => runCheckNow(mon
 setBtnCheckNow && setBtnCheckNow.addEventListener('click', () => runCheckNow(setBtnCheckNow));
 
 // Clear log
-btnClearLog && btnClearLog.addEventListener('click', () => {
+btnClearLog && btnClearLog.addEventListener('click', async () => {
   gStats.log            = [];
   gStats.totalChecks    = 0;
   gStats.successChecks  = 0;
@@ -520,6 +521,11 @@ btnClearLog && btnClearLog.addEventListener('click', () => {
     m.lastResult      = null;
     refreshMonitorCard(url, m);
   });
+  try {
+    await fetch(API_STATS, { method: 'DELETE' });
+  } catch (e) {
+    console.warn('Failed to clear stats on server', e);
+  }
   renderLog();
   renderOverviewRecentLog();
   renderOverviewEndpoints();
@@ -559,7 +565,6 @@ function startAllMonitoring() {
   }
 
   cfg.isMonitoring = true;
-  persistSettings(true);
   localStorage.setItem('backsaver_is_monitoring', 'true');
   persistSettings(true);
 
@@ -577,7 +582,7 @@ function startAllMonitoring() {
   monitorEmpty.style.display = 'none';
 
   // Spin up one independent monitor per URL
-  savedUrls.forEach(url => {
+  savedUrls.forEach(async url => {
     const m = {
       timerId: null, countdownId: null, countdownRemaining: 0,
       lastResult: null,
@@ -585,6 +590,7 @@ function startAllMonitoring() {
     };
     monitors.set(url, m);
     createMonitorCard(url);
+    await performCheck(url, cfg.method);
     scheduleNext(url);
   });
 
@@ -594,7 +600,6 @@ function startAllMonitoring() {
 
 function stopAllMonitoring() {
   cfg.isMonitoring = false;
-  persistSettings(false);
   localStorage.setItem('backsaver_is_monitoring', 'false');
   persistSettings(false);
 
@@ -638,7 +643,7 @@ function scheduleNext(url) {
 
   m.timerId = setTimeout(async () => {
     if (!cfg.isMonitoring || !monitors.has(url)) return;
-    
+    await performCheck(url, cfg.method);
     scheduleNext(url);
   }, cfg.intervalMs);
 }
@@ -876,33 +881,9 @@ function flashBorder(el, color) {
   }
 
 
-  // ── Developer Welcome Popup & Copyright ──
+  // ── Copyright year ──
   const currentYear = new Date().getFullYear();
   const sidebarYear = $('sidebar-year');
-  const popupYear   = $('popup-year');
   if (sidebarYear) sidebarYear.textContent = currentYear;
-  if (popupYear)   popupYear.textContent   = currentYear;
-
-  const popupBackdrop = $('popup-backdrop');
-  const popupCloseBtn = $('popup-close-btn');
-
-  if (popupBackdrop && popupCloseBtn) {
-    // Check if we already showed it
-    const hasSeenPopup = localStorage.getItem('backsaver_seen_developer_popup');
-
-    if (!hasSeenPopup) {
-      // Show it
-      popupBackdrop.style.display = 'flex';
-
-      // Close logic
-      popupCloseBtn.addEventListener('click', () => {
-        popupBackdrop.classList.add('is-hidden');
-        localStorage.setItem('backsaver_seen_developer_popup', 'true');
-        setTimeout(() => { popupBackdrop.style.display = 'none'; }, 300);
-      });
-    } else {
-      popupBackdrop.style.display = 'none';
-    }
-  }
 })();
 

@@ -1,32 +1,12 @@
 import { NextResponse } from 'next/server';
-import { Pool } from 'pg';
-
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-});
-
-async function ensureTable() {
-  const client = await pool.connect();
-  try {
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS app_state (
-        key VARCHAR(255) PRIMARY KEY,
-        value JSONB NOT NULL
-      );
-    `);
-  } finally {
-    client.release();
-  }
-}
+import { pool, ensureTable } from '../../lib/db';
 
 export async function GET() {
   try {
     await ensureTable();
     const result = await pool.query("SELECT value FROM app_state WHERE key = 'urls'");
-    if (result.rows.length > 0) {
-      return NextResponse.json({ urls: result.rows[0].value });
-    }
-    return NextResponse.json({ urls: [] });
+    const urls = result.rows.length > 0 ? result.rows[0].value : [];
+    return NextResponse.json({ urls });
   } catch (err: any) {
     console.error('DB GET Error:', err);
     return NextResponse.json({ urls: [] });
@@ -36,6 +16,9 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     const { urls } = await request.json();
+    if (!Array.isArray(urls)) {
+      return NextResponse.json({ error: 'urls must be an array' }, { status: 400 });
+    }
     await ensureTable();
     
     await pool.query(

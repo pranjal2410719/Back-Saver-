@@ -1,10 +1,6 @@
 import Script from 'next/script'
-import fs from 'fs'
-import path from 'path'
 
 export default function Home() {
-  // Read body.html at build time/request time to render safely
-  // Wait, I can just inject the raw string here using code generation!
   return (
     <>
       <div dangerouslySetInnerHTML={{ __html: `  <aside class="sidebar" id="sidebar" aria-label="Primary navigation">
@@ -345,73 +341,6 @@ export default function Home() {
     </section>
 
   </main>
-
-  <!-- ═══════════════════════════════════════════
-       DEVELOPER WELCOME POPUP
-  ═══════════════════════════════════════════ -->
-  <div class="popup-backdrop" id="popup-backdrop" role="dialog" aria-modal="true" aria-labelledby="popup-title">
-    <div class="popup-card">
-
-      <!-- Avatar + accent ring -->
-      <div class="popup-avatar-wrap" aria-hidden="true">
-        <div class="popup-avatar-ring"></div>
-        <div class="popup-avatar">
-          <svg width="36" height="36" viewBox="0 0 36 36" fill="none">
-            <circle cx="18" cy="18" r="16" stroke="#c8f169" stroke-width="1.6"/>
-            <circle cx="18" cy="18" r="5.5" fill="#c8f169"/>
-          </svg>
-        </div>
-      </div>
-
-      <div class="popup-eyebrow">👋 Welcome to BackSaver</div>
-
-      <h2 class="popup-title" id="popup-title">Built by<br>Pranjal Yadav</h2>
-
-      <p class="popup-desc">
-        BackSaver is an open-source URL health monitor — add your backend endpoints,
-        monitor uptime in real time, and catch downtime before your users do.
-      </p>
-
-      <div class="popup-tags">
-        <span class="popup-tag">URL Monitor</span>
-        <span class="popup-tag">Open Source</span>
-        <span class="popup-tag">v3.0</span>
-      </div>
-
-      <div class="popup-actions">
-        <a
-          class="popup-btn-github"
-          href="https://github.com/pranjal2410719"
-          target="_blank"
-          rel="noopener noreferrer"
-          aria-label="Visit Pranjal Yadav's GitHub profile"
-        >
-          <!-- GitHub mark SVG -->
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-            <path d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577
-              0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61-.546-1.385-1.335-1.755-1.335-1.755-1.087-.744.084-.729.084-.729
-              1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93
-              0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23A11.509 11.509 0 0 1 12 5.803c1.02.005
-              2.047.138 3.006.404 2.29-1.552 3.297-1.23 3.297-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22
-              0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57
-              C20.565 21.795 24 17.295 24 12c0-6.63-5.37-12-12-12z"/>
-          </svg>
-          View GitHub Profile
-        </a>
-        <button class="popup-btn-close" id="popup-close-btn">
-          Get Started →
-        </button>
-      </div>
-
-      <!-- Copyright line -->
-      <p class="popup-copyright">
-        &copy; <span id="popup-year"></span> Pranjal Yadav · All rights reserved
-      </p>
-
-    </div>
-  </div>
-
-  
 ` }} />
       <Script src="/app.js" strategy="lazyOnload" />
     </>
